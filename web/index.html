@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Job Hunter AI</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+    <div class="container">
+        <header>
+            <p class="eyebrow">Autonomous pipeline</p>
+            <h1>Job Hunter AI ✦</h1>
+            <p>Futuristic job radar: auto-discovers sources, scrapes the last 10 days, and matches Go/backend roles you can act on fast.</p>
+        </header>
+
+        <div class="tabs">
+            <button id="tabJobs" class="tab active" onclick="setTab('jobs')">Jobs</button>
+            <button id="tabSources" class="tab" onclick="setTab('sources')">Sources</button>
+        </div>
+
+        <section class="sources-section hidden">
+            <div class="section-header">
+                <div>
+                    <h2>Add New Source</h2>
+                    <p class="hint">We already scan job boards and startup career pages. Drop a new link to classify and queue it for scraping.</p>
+                </div>
+                <span class="badge">Last 7-10 day scrape</span>
+            </div>
+            <div class="input-group">
+                <input type="text" id="sourceUrl" placeholder="https://company.com/careers">
+                <select id="sourceType">
+                    <option value="job_board">Job board</option>
+                    <option value="company_page">Company careers</option>
+                    <option value="unknown">Auto detect</option>
+                </select>
+                <button onclick="addSource()">Add Source</button>
+            </div>
+            <div id="analysisResult" class="result-box hidden"></div>
+            <div id="sourcesList" class="sources-list"></div>
+        </section>
+
+        <section class="jobs-section">
+            <div class="section-header">
+                <div>
+                    <h2>Recommended Jobs</h2>
+                    <p class="hint">Filtered for Go backend stack. Jobs expire after 30 days so you only see fresh leads.</p>
+                </div>
+                <span class="badge subtle">Auto-matched</span>
+            </div>
+            <div id="jobList" class="job-list">
+                <!-- Jobs will be populated here -->
+                <div class="loading">Loading jobs...</div>
+            </div>
+        </section>
+    </div>
+    <div id="jobModal" class="modal hidden" onclick="closeJobModal(event)"></div>
+    <div id="applyModal" class="modal hidden" onclick="closeApplyPrompt(event)"></div>
+    <script src="app.js"></script>
+</body>
+
+</html>
