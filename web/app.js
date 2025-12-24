@@ -5,6 +5,7 @@ const resultBox = document.getElementById('analysisResult');
 const sourcesList = document.getElementById('sourcesList');
 const jobModal = document.getElementById('jobModal');
 const applyModal = document.getElementById('applyModal');
+const statsGrid = document.getElementById('statsGrid');
 
 const state = {
     jobs: [],
@@ -18,6 +19,7 @@ const state = {
     sourcesTotal: 0,
     statusFilter: 'active', // active, applied, rejected, closed, all
     activeTotal: 0,
+    stats: null,
 };
 
 const escapeMap = {
@@ -166,6 +168,47 @@ function renderSources(items) {
     sourcesList.innerHTML = content + renderPagination('sources', state.sourcesPage, state.sourcesTotal);
 }
 
+function renderStats(stats) {
+    if (!statsGrid) return;
+    if (!stats) {
+        statsGrid.innerHTML = '<div class="card">Stats not available.</div>';
+        return;
+    }
+
+    statsGrid.innerHTML = `
+        <div class="card glow stat-card">
+            <span class="stat-label">Pages Scanned</span>
+            <span class="stat-value">${stats.pages_crawled ?? 0}</span>
+            <span class="stat-sub">HTML pages parsed</span>
+        </div>
+        <div class="card glow stat-card">
+            <span class="stat-label">Sources Available</span>
+            <span class="stat-value">${stats.sources_total ?? 0}</span>
+            <span class="stat-sub">Approved sources</span>
+        </div>
+        <div class="card glow stat-card">
+            <span class="stat-label">Jobs Available</span>
+            <span class="stat-value">${stats.active_jobs ?? 0}</span>
+            <span class="stat-sub">Active jobs right now</span>
+        </div>
+        <div class="card glow stat-card">
+            <span class="stat-label">Jobs Total</span>
+            <span class="stat-value">${stats.jobs_total ?? 0}</span>
+            <span class="stat-sub">All stored jobs</span>
+        </div>
+        <div class="card glow stat-card">
+            <span class="stat-label">AI Calls</span>
+            <span class="stat-value">${stats.ai_calls ?? 0}</span>
+            <span class="stat-sub">Classifier + matcher</span>
+        </div>
+        <div class="card glow stat-card">
+            <span class="stat-label">Errors</span>
+            <span class="stat-value">${stats.errors_total ?? 0}</span>
+            <span class="stat-sub">Network/parse/store</span>
+        </div>
+    `;
+}
+
 async function fetchJobs(page = 0) {
     state.jobsPage = page;
     if (!jobList) return;
@@ -199,6 +242,19 @@ async function fetchSources(page = 0) {
         renderSources(normalized);
     } catch (error) {
         console.error('Failed to load sources', error);
+    }
+}
+
+async function fetchStats() {
+    if (!statsGrid) return;
+    statsGrid.innerHTML = '<div class="card">Loading stats...</div>';
+    try {
+        const response = await fetch(`${API_URL}/stats`);
+        const payload = await response.json();
+        state.stats = payload;
+        renderStats(payload);
+    } catch (error) {
+        statsGrid.innerHTML = `<div class="card" style="color: red">Error loading stats: ${error.message}</div>`;
     }
 }
 
@@ -337,21 +393,35 @@ function setTab(tab) {
     state.currentTab = tab;
     const jobsSection = document.querySelector('.jobs-section');
     const sourcesSection = document.querySelector('.sources-section');
+    const statsSection = document.querySelector('.stats-section');
     const tabJobs = document.getElementById('tabJobs');
     const tabSources = document.getElementById('tabSources');
+    const tabStats = document.getElementById('tabStats');
 
     if (tab === 'jobs') {
         jobsSection.classList.remove('hidden');
         sourcesSection.classList.add('hidden');
+        statsSection.classList.add('hidden');
         tabJobs.classList.add('active');
         tabSources.classList.remove('active');
+        tabStats.classList.remove('active');
         fetchJobs(state.jobsPage);
-    } else {
+    } else if (tab === 'sources') {
         sourcesSection.classList.remove('hidden');
         jobsSection.classList.add('hidden');
+        statsSection.classList.add('hidden');
         tabSources.classList.add('active');
         tabJobs.classList.remove('active');
+        tabStats.classList.remove('active');
         fetchSources(state.sourcesPage);
+    } else {
+        statsSection.classList.remove('hidden');
+        jobsSection.classList.add('hidden');
+        sourcesSection.classList.add('hidden');
+        tabStats.classList.add('active');
+        tabJobs.classList.remove('active');
+        tabSources.classList.remove('active');
+        fetchStats();
     }
 }
 

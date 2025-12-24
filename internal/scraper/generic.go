@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/baxromumarov/job-hunter/internal/httpx"
+	"github.com/baxromumarov/job-hunter/internal/observability"
+	"github.com/baxromumarov/job-hunter/internal/urlutil"
 	"github.com/gocolly/colly/v2"
 	"golang.org/x/net/html"
 )
@@ -135,7 +137,7 @@ func (s *GenericScraper) collectDetailLinks(ctx context.Context, pageURL string)
 	}
 	seen := make(map[string]struct{})
 	var links []string
-	_ = s.fetcher.Fetch(ctx, pageURL, func(c *colly.Collector) {
+	if err := s.fetcher.Fetch(ctx, pageURL, func(c *colly.Collector) {
 		c.OnHTML("a[href]", func(e *colly.HTMLElement) {
 			href := e.Attr("href")
 			if href == "" {
@@ -153,13 +155,21 @@ func (s *GenericScraper) collectDetailLinks(ctx context.Context, pageURL string)
 			if resolved == "" {
 				return
 			}
+			pageType := urlutil.DetectPageType(resolved)
+			if pageType == urlutil.PageTypeNonJob {
+				return
+			}
 			if _, ok := seen[resolved]; ok {
 				return
 			}
 			seen[resolved] = struct{}{}
 			links = append(links, resolved)
 		})
-	})
+	}); err != nil {
+		observability.IncError(observability.ClassifyFetchError(err), "scraper_generic")
+		return links
+	}
+	observability.IncPagesCrawled("scraper_generic")
 	return links
 }
 
@@ -170,7 +180,7 @@ func (s *GenericScraper) extractJob(ctx context.Context, link string, base *url.
 		desc    string
 	)
 
-	_ = s.fetcher.Fetch(ctx, link, func(c *colly.Collector) {
+	if err := s.fetcher.Fetch(ctx, link, func(c *colly.Collector) {
 		c.OnHTML("script[type='application/ld+json']", func(e *colly.HTMLElement) {
 			if jsonJob != nil {
 				return
@@ -199,7 +209,11 @@ func (s *GenericScraper) extractJob(ctx context.Context, link string, base *url.
 				desc = strings.TrimSpace(e.Text)
 			}
 		})
-	})
+	}); err != nil {
+		observability.IncError(observability.ClassifyFetchError(err), "scraper_generic")
+		return nil
+	}
+	observability.IncPagesCrawled("scraper_generic")
 
 	if jsonJob != nil {
 		if jsonJob.URL == "" {

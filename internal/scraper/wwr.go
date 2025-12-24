@@ -58,14 +58,14 @@ func (w *WWRscraper) FetchJobs(since time.Time) ([]RawJob, error) {
 			Description: title + " at " + company,
 			Company:     company,
 			Location:    "Remote",
-			PostedAt:    time.Now(),
+			PostedAt:    time.Time{},
 		})
 	})
 
 	// Filter recent posts (they don't expose exact dates on the list; keep them all)
 	filtered := make([]RawJob, 0, len(jobs))
 	for _, j := range jobs {
-		if j.PostedAt.IsZero() || j.PostedAt.Before(since) {
+		if !j.PostedAt.IsZero() && j.PostedAt.Before(since) {
 			continue
 		}
 		filtered = append(filtered, j)

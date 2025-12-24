@@ -3,14 +3,16 @@ package discovery
 import (
 	"context"
 	"encoding/json"
-	"log"
+	"log/slog"
 	"strings"
 	"time"
 
 	_ "embed"
 
 	"github.com/baxromumarov/job-hunter/internal/core"
+	"github.com/baxromumarov/job-hunter/internal/observability"
 	"github.com/baxromumarov/job-hunter/internal/store"
+	"github.com/baxromumarov/job-hunter/internal/urlutil"
 )
 
 type Engine struct {
@@ -34,7 +36,7 @@ var seedCandidates = loadSeedCandidates()
 func loadSeedCandidates() []candidateSource {
 	var seeds []candidateSource
 	if err := json.Unmarshal(seedsJSON, &seeds); err != nil {
-		log.Printf("Discovery: failed to load embedded seeds: %v", err)
+		slog.Error("discovery failed to load embedded seeds", "error", err)
 		return nil
 	}
 	return seeds
@@ -48,7 +50,7 @@ func NewEngine(store *store.Store, classifier *core.ClassifierService) *Engine {
 }
 
 func (e *Engine) StartDiscovery(ctx context.Context) {
-	log.Println("Starting Auto Discovery Engine...")
+	slog.Info("discovery start")
 
 	go func() {
 		e.runCycle(ctx)
@@ -80,7 +82,7 @@ func (e *Engine) runCycle(ctx context.Context) {
 			time.Sleep(500 * time.Millisecond)
 		}
 	}
-	log.Println("Discovery: cycle complete")
+	slog.Info("discovery cycle complete")
 }
 
 func (e *Engine) crawlForCareerLinks(ctx context.Context) {
@@ -136,13 +138,16 @@ func (e *Engine) searchWeb(ctx context.Context) {
 				continue
 			}
 			seen[u] = struct{}{}
-			e.processCandidate(ctx, candidateSource{
-				URL:        u,
-				SourceType: guessSourceType(u),
-			})
 
 			// Crawl the result page for career/job links and enqueue those too.
 			links := c.extractCareerLinks(ctx, u)
+			atsOnly := containsATS(links)
+			if !atsOnly && urlutil.IsDiscoveryEligible(u) {
+				e.processCandidate(ctx, candidateSource{
+					URL:        u,
+					SourceType: guessSourceType(u),
+				})
+			}
 			for _, link := range links {
 				if _, ok := seen[link]; ok {
 					continue
@@ -158,7 +163,57 @@ func (e *Engine) searchWeb(ctx context.Context) {
 }
 
 func (e *Engine) processCandidate(ctx context.Context, c candidateSource) {
-	log.Printf("Discovery: Analyzing candidate %s", c.URL)
+	normalized, host, err := urlutil.Normalize(c.URL)
+	if err != nil {
+		slog.Info("discovery skip", "url", c.URL, "reason", "invalid_url")
+		return
+	}
+
+	pageType := urlutil.DetectPageType(normalized)
+	sourceType := c.SourceType
+	if sourceType == "" {
+		sourceType = guessSourceType(normalized)
+	}
+	if pageType == urlutil.PageTypeNonJob {
+		_, _, _ = e.store.AddSource(ctx, normalized, sourceType, pageType, false, "", false, false, 0, "blocked_path")
+		slog.Info("discovery skip", "url", normalized, "reason", "blocked_path", "page_type", pageType)
+		return
+	}
+	if pageType == urlutil.PageTypeJobDetail {
+		_, _, _ = e.store.AddSource(ctx, normalized, sourceType, pageType, false, "", false, false, 0, "job_detail")
+		slog.Info("discovery skip", "url", normalized, "reason", "non_job", "page_type", pageType)
+		return
+	}
+
+	existing, err := e.store.FindSourceByURL(ctx, c.URL)
+	if err != nil {
+		observability.IncError(observability.ErrorStore, "discovery")
+		slog.Error("discovery lookup failed", "url", normalized, "error", err)
+		return
+	}
+	if existing != nil {
+		reason := "already_processed"
+		if existing.IsAlias {
+			reason = "alias"
+		} else if existing.PageType == urlutil.PageTypeNonJob || existing.PageType == urlutil.PageTypeJobDetail {
+			reason = "non_job"
+		}
+		slog.Info("discovery skip", "url", normalized, "reason", reason, "page_type", existing.PageType)
+		return
+	}
+
+	canonicalURL, isAlias, err := e.store.ResolveCanonicalSource(ctx, normalized, host, pageType)
+	if err != nil {
+		observability.IncError(observability.ErrorStore, "discovery")
+		slog.Error("discovery canonical resolve failed", "url", normalized, "error", err)
+		return
+	}
+	if isAlias {
+		_, _, _ = e.store.AddSource(ctx, normalized, sourceType, pageType, true, canonicalURL, false, false, 0, "alias")
+		slog.Info("discovery skip", "url", normalized, "reason", "alias", "canonical", canonicalURL)
+		return
+	}
+	canonicalURL = ""
 
 	// In a real scenario, we would fetch the page content here.
 	// We pass dummy content to the classifier, which mocks the AI anyway.
@@ -177,31 +232,54 @@ func (e *Engine) processCandidate(ctx context.Context, c candidateSource) {
 		text = "Sample text for " + c.URL + " which is definitely long enough to pass the fifty character limit set in the mock ai client."
 	}
 
-	classification, err := e.classifier.Classify(ctx, c.URL, title, meta, text)
+	classification, err := e.classifier.Classify(ctx, normalized, title, meta, text)
 	if err != nil {
-		log.Printf("Failed to classify %s: %v", c.URL, err)
+		observability.IncError(observability.ErrorAI, "discovery")
+		_ = e.store.MarkSourceErrorByURL(ctx, normalized, observability.ErrorAI, err.Error())
+		slog.Error("discovery classify failed", "url", normalized, "error", err)
 		return
 	}
 
 	if classification.IsJobSite && classification.TechRelated && classification.Confidence > 0.7 {
-		sourceType := c.SourceType
-		if sourceType == "" {
-			sourceType = guessSourceType(c.URL)
-		}
-
-		id, existed, err := e.store.AddSource(ctx, c.URL, sourceType, classification.IsJobSite, classification.TechRelated, classification.Confidence, classification.Reason)
+		observability.IncSourceDecision("accepted")
+		id, existed, err := e.store.AddSource(
+			ctx,
+			normalized,
+			sourceType,
+			pageType,
+			false,
+			canonicalURL,
+			classification.IsJobSite,
+			classification.TechRelated,
+			classification.Confidence,
+			classification.Reason,
+		)
 		if err != nil {
-			log.Printf("Failed to store source %s: %v", c.URL, err)
+			observability.IncError(observability.ErrorStore, "discovery")
+			slog.Error("discovery store source failed", "url", normalized, "error", err)
 		} else {
 			if existed {
-				log.Printf("Discovery: source already exists %s (ID: %d)", c.URL, id)
+				slog.Info("discovery skip", "url", normalized, "reason", "already_processed", "id", id)
 			} else {
-				log.Printf("Discovery: APPROVED source %s (ID: %d)", c.URL, id)
+				slog.Info("discovery source approved", "url", normalized, "id", id)
 				// Scraping now handled by ingestion using site-specific scrapers
 			}
 		}
 	} else {
-		log.Printf("Discovery: REJECTED source %s (Confidence: %.2f)", c.URL, classification.Confidence)
+		observability.IncSourceDecision("rejected")
+		_, _, _ = e.store.AddSource(
+			ctx,
+			normalized,
+			c.SourceType,
+			urlutil.PageTypeNonJob,
+			false,
+			"",
+			false,
+			false,
+			classification.Confidence,
+			classification.Reason,
+		)
+		slog.Info("discovery skip", "url", normalized, "reason", "non_job", "confidence", classification.Confidence)
 	}
 }
 
@@ -212,8 +290,20 @@ func guessSourceType(u string) string {
 		strings.Contains(u, "builtin.com") ||
 		strings.Contains(u, "linkedin") ||
 		strings.Contains(u, "greenhouse.io") ||
-		strings.Contains(u, "lever.co") {
+		strings.Contains(u, "lever.co") ||
+		strings.Contains(u, "ashbyhq.com") ||
+		strings.Contains(u, "workable.com") {
 		return "job_board"
 	}
 	return "company_page"
+}
+
+func containsATS(links []string) bool {
+	for _, link := range links {
+		_, host, err := urlutil.Normalize(link)
+		if err == nil && urlutil.IsATSHost(host) {
+			return true
+		}
+	}
+	return false
 }

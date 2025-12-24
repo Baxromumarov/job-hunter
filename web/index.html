@@ -19,6 +19,7 @@
         <div class="tabs">
             <button id="tabJobs" class="tab active" onclick="setTab('jobs')">Jobs</button>
             <button id="tabSources" class="tab" onclick="setTab('sources')">Sources</button>
+            <button id="tabStats" class="tab" onclick="setTab('stats')">Stats</button>
         </div>
 
         <section class="sources-section hidden">
@@ -63,6 +64,19 @@
             <div id="jobList" class="job-list">
                 <!-- Jobs will be populated here -->
                 <div class="loading">Loading jobs...</div>
+            </div>
+        </section>
+
+        <section class="stats-section hidden">
+            <div class="section-header">
+                <div>
+                    <h2>System Stats</h2>
+                    <p class="hint">Quick health readout for crawl volume, sources, and job inventory.</p>
+                </div>
+                <span class="badge">Live</span>
+            </div>
+            <div id="statsGrid" class="stats-grid">
+                <div class="card">Loading stats...</div>
             </div>
         </section>
     </div>

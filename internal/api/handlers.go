@@ -7,7 +7,9 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/baxromumarov/job-hunter/internal/observability"
 	"github.com/baxromumarov/job-hunter/internal/store"
+	"github.com/baxromumarov/job-hunter/internal/urlutil"
 )
 
 // handleListJobs works as a mock for now since we don't have the full DB implementation for Jobs yet
@@ -98,16 +100,73 @@ func (s *Server) handleAddSource(w http.ResponseWriter, r *http.Request) {
 		req.SourceType = "unknown"
 	}
 
+	normalized, host, err := urlutil.Normalize(req.URL)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid URL")
+		return
+	}
+
+	pageType := urlutil.DetectPageType(normalized)
+	if pageType == urlutil.PageTypeNonJob || pageType == urlutil.PageTypeJobDetail {
+		_, existed, err := s.store.AddSource(r.Context(), normalized, req.SourceType, pageType, false, "", false, false, 0, "blocked path")
+		if err != nil {
+			respondError(w, http.StatusInternalServerError, "Failed to save source: "+err.Error())
+			return
+		}
+		respondJSON(w, http.StatusOK, map[string]interface{}{
+			"is_job_site":  false,
+			"tech_related": false,
+			"confidence":   0.0,
+			"reason":       "Blocked by non-job path",
+			"existed":      existed,
+		})
+		return
+	}
+
+	canonicalURL, isAlias, err := s.store.ResolveCanonicalSource(r.Context(), normalized, host, pageType)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "Failed to resolve canonical source: "+err.Error())
+		return
+	}
+
+	if isAlias {
+		_, existed, err := s.store.AddSource(r.Context(), normalized, req.SourceType, pageType, true, canonicalURL, false, false, 0, "alias")
+		if err != nil {
+			respondError(w, http.StatusInternalServerError, "Failed to save source: "+err.Error())
+			return
+		}
+		respondJSON(w, http.StatusOK, map[string]interface{}{
+			"is_job_site":  false,
+			"tech_related": false,
+			"confidence":   0.0,
+			"reason":       "Alias of canonical source",
+			"existed":      existed,
+		})
+		return
+	}
+	canonicalURL = ""
+
 	// Trigger classification
 	// In a real app this might be async or queued
-	classification, err := s.classifier.Classify(r.Context(), req.URL, "Mock Title", "Mock Meta", "Mock Text Sample from "+req.URL)
+	classification, err := s.classifier.Classify(r.Context(), normalized, "Mock Title", "Mock Meta", "Mock Text Sample from "+normalized)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "Classification failed: "+err.Error())
 		return
 	}
 
 	// Save source to DB
-	_, existed, err := s.store.AddSource(r.Context(), req.URL, req.SourceType, classification.IsJobSite, classification.TechRelated, classification.Confidence, classification.Reason)
+	_, existed, err := s.store.AddSource(
+		r.Context(),
+		normalized,
+		req.SourceType,
+		pageType,
+		false,
+		canonicalURL,
+		classification.IsJobSite,
+		classification.TechRelated,
+		classification.Confidence,
+		classification.Reason,
+	)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "Failed to save source: "+err.Error())
 		return
@@ -119,6 +178,26 @@ func (s *Server) handleAddSource(w http.ResponseWriter, r *http.Request) {
 		"confidence":   classification.Confidence,
 		"reason":       classification.Reason,
 		"existed":      existed,
+	})
+}
+
+func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
+	sourcesTotal, jobsTotal, activeJobs, err := s.store.GetStatsCounts(r.Context())
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "Failed to load stats: "+err.Error())
+		return
+	}
+
+	snapshot := observability.Snapshot()
+	respondJSON(w, http.StatusOK, map[string]interface{}{
+		"pages_crawled":     snapshot.PagesCrawled,
+		"jobs_discovered":   snapshot.JobsDiscovered,
+		"ai_calls":          snapshot.AICalls,
+		"errors_total":      snapshot.ErrorsTotal,
+		"crawl_avg_seconds": snapshot.CrawlSecondsAvg,
+		"sources_total":     sourcesTotal,
+		"jobs_total":        jobsTotal,
+		"active_jobs":       activeJobs,
 	})
 }
 

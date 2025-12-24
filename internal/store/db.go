@@ -8,6 +8,8 @@ import (
 	"time"
 
 	_ "github.com/lib/pq"
+
+	"github.com/baxromumarov/job-hunter/internal/urlutil"
 )
 
 type Store struct {
@@ -76,7 +78,12 @@ func scanNullTime(nt sql.NullTime) *time.Time {
 type Source struct {
 	ID             int        `json:"id"`
 	URL            string     `json:"url"`
+	NormalizedURL  string     `json:"normalized_url,omitempty"`
+	Host           string     `json:"host,omitempty"`
 	Type           string     `json:"type"`
+	PageType       string     `json:"page_type,omitempty"`
+	IsAlias        bool       `json:"is_alias,omitempty"`
+	CanonicalURL   string     `json:"canonical_url,omitempty"`
 	IsJobSite      bool       `json:"is_job_site"`
 	TechRelated    bool       `json:"tech_related"`
 	Confidence     float64    `json:"confidence"`
@@ -84,6 +91,9 @@ type Source struct {
 	LastScrapedAt  *time.Time `json:"last_scraped_at,omitempty"`
 	DiscoveredAt   *time.Time `json:"discovered_at,omitempty"`
 	Classification string     `json:"classification_reason,omitempty"`
+	LastErrorType  string     `json:"last_error_type,omitempty"`
+	LastErrorMsg   string     `json:"last_error_message,omitempty"`
+	LastErrorAt    *time.Time `json:"last_error_at,omitempty"`
 }
 
 type Job struct {
@@ -243,7 +253,9 @@ func (s *Store) ListSources(ctx context.Context, limit, offset int) ([]Source, i
 		FROM 
 			sources 
 		WHERE 
-			is_job_site = TRUE`,
+			is_job_site = TRUE
+			AND is_alias = FALSE
+			AND page_type IN ('career_root', 'job_list')`,
 	).Scan(&total); err != nil {
 		return nil, 0, err
 	}
@@ -252,18 +264,28 @@ func (s *Store) ListSources(ctx context.Context, limit, offset int) ([]Source, i
 		SELECT 
 			id, 
 			url, 
+			COALESCE(normalized_url, ''),
+			COALESCE(host, ''),
 			type, 
+			COALESCE(page_type, ''),
+			is_alias,
+			COALESCE(canonical_url, ''),
 			is_job_site, 
 			tech_related, 
 			confidence, 
 			last_checked_at, 
 			last_scraped_at, 
 			discovered_at, 
-			COALESCE(classification_reason, '')
+			COALESCE(classification_reason, ''),
+			COALESCE(last_error_type, ''),
+			COALESCE(last_error_message, ''),
+			last_error_at
 		FROM 
 			sources
 		WHERE 
 			is_job_site = TRUE
+			AND is_alias = FALSE
+			AND page_type IN ('career_root', 'job_list')
 		ORDER BY 
 			last_scraped_at NULLS FIRST, 
 			last_checked_at NULLS FIRST
@@ -286,12 +308,18 @@ func (s *Store) ListSources(ctx context.Context, limit, offset int) ([]Source, i
 			lastChecked  sql.NullTime
 			lastScraped  sql.NullTime
 			discoveredAt sql.NullTime
+			lastErrorAt  sql.NullTime
 		)
 
 		if err := rows.Scan(
 			&src.ID,
 			&src.URL,
+			&src.NormalizedURL,
+			&src.Host,
 			&src.Type,
+			&src.PageType,
+			&src.IsAlias,
+			&src.CanonicalURL,
 			&src.IsJobSite,
 			&src.TechRelated,
 			&src.Confidence,
@@ -299,6 +327,9 @@ func (s *Store) ListSources(ctx context.Context, limit, offset int) ([]Source, i
 			&lastScraped,
 			&discoveredAt,
 			&src.Classification,
+			&src.LastErrorType,
+			&src.LastErrorMsg,
+			&lastErrorAt,
 		); err != nil {
 			return nil, 0, err
 		}
@@ -306,6 +337,7 @@ func (s *Store) ListSources(ctx context.Context, limit, offset int) ([]Source, i
 		src.LastCheckedAt = scanNullTime(lastChecked)
 		src.LastScrapedAt = scanNullTime(lastScraped)
 		src.DiscoveredAt = scanNullTime(discoveredAt)
+		src.LastErrorAt = scanNullTime(lastErrorAt)
 
 		sources = append(sources, src)
 	}
@@ -315,8 +347,11 @@ func (s *Store) ListSources(ctx context.Context, limit, offset int) ([]Source, i
 
 func (s *Store) AddSource(
 	ctx context.Context,
-	url,
-	sourceType string,
+	rawURL,
+	sourceType,
+	pageType string,
+	isAlias bool,
+	canonicalURL string,
 	isJobSite,
 	techRelated bool,
 	confidence float64,
@@ -326,6 +361,14 @@ func (s *Store) AddSource(
 	existed bool,
 	err error,
 ) {
+	normalized, host, err := urlutil.Normalize(rawURL)
+	if err != nil {
+		normalized = rawURL
+	}
+	if pageType == "" {
+		pageType = urlutil.PageTypeNonJob
+	}
+
 	var existingID sql.NullInt64
 	if err = s.db.QueryRowContext(
 		ctx,
@@ -334,8 +377,10 @@ func (s *Store) AddSource(
 		FROM 
 			sources 
 		WHERE 
-			url = $1`,
-		url,
+			normalized_url = $1
+			OR url = $2`,
+		normalized,
+		rawURL,
 	).Scan(
 		&existingID,
 	); err != nil && err != sql.ErrNoRows {
@@ -344,14 +389,53 @@ func (s *Store) AddSource(
 
 	if existingID.Valid {
 		existed = true
+		id = int(existingID.Int64)
+		_, err = s.db.ExecContext(
+			ctx,
+			`UPDATE
+				sources
+			SET
+				url = $1,
+				normalized_url = $2,
+				host = $3,
+				type = $4,
+				page_type = $5,
+				is_alias = $6,
+				canonical_url = NULLIF($7, ''),
+				is_job_site = $8,
+				tech_related = $9,
+				confidence = $10,
+				classification_reason = $11,
+				last_checked_at = NOW()
+			WHERE
+				id = $12`,
+			rawURL,
+			normalized,
+			host,
+			sourceType,
+			pageType,
+			isAlias,
+			canonicalURL,
+			isJobSite,
+			techRelated,
+			confidence,
+			reason,
+			id,
+		)
+		return id, existed, err
 	}
 
 	err = s.db.QueryRowContext(
 		ctx,
 		`INSERT INTO
     		sources (
-        		url,
+				url,
+				normalized_url,
+				host,
         		type,
+				page_type,
+				is_alias,
+				canonical_url,
         		is_job_site,
         		tech_related,
         		confidence,
@@ -361,25 +445,28 @@ func (s *Store) AddSource(
     		)
 		VALUES
     		(
-        		$1,
-        		$2,
-        		$3,
+				$1,
+				$2,
+				$3,
         		$4,
-        		$5,
-        		$6,
+				$5,
+				$6,
+				NULLIF($7, ''),
+        		$8,
+        		$9,
+        		$10,
+        		$11,
         		NOW(),
         		NOW()
-    		) ON CONFLICT (url) DO
-		UPDATE
-		SET
-    	type = EXCLUDED.type,
-    	is_job_site = EXCLUDED.is_job_site,
-    	tech_related = EXCLUDED.tech_related,
-    	confidence = EXCLUDED.confidence,
-    	classification_reason = EXCLUDED.classification_reason,
-    	last_checked_at = NOW() RETURNING id;`,
-		url,
+    		)
+		RETURNING id;`,
+		rawURL,
+		normalized,
+		host,
 		sourceType,
+		pageType,
+		isAlias,
+		canonicalURL,
 		isJobSite,
 		techRelated,
 		confidence,
@@ -401,6 +488,194 @@ func (s *Store) MarkSourceScraped(ctx context.Context, sourceID int) error {
 		sourceID,
 	)
 
+	return err
+}
+
+func (s *Store) FindSourceByURL(ctx context.Context, rawURL string) (*Source, error) {
+	normalized, _, err := urlutil.Normalize(rawURL)
+	if err != nil {
+		normalized = rawURL
+	}
+	row := s.db.QueryRowContext(
+		ctx,
+		`SELECT 
+			id,
+			url,
+			COALESCE(normalized_url, ''),
+			COALESCE(host, ''),
+			COALESCE(page_type, ''),
+			is_alias,
+			COALESCE(canonical_url, ''),
+			is_job_site
+		FROM
+			sources
+		WHERE
+			normalized_url = $1
+			OR url = $1
+			OR url = $2
+		LIMIT 1`,
+		normalized,
+		rawURL,
+	)
+
+	var src Source
+	if err := row.Scan(
+		&src.ID,
+		&src.URL,
+		&src.NormalizedURL,
+		&src.Host,
+		&src.PageType,
+		&src.IsAlias,
+		&src.CanonicalURL,
+		&src.IsJobSite,
+	); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &src, nil
+}
+
+func (s *Store) GetCanonicalSourceByHost(ctx context.Context, host string) (*Source, error) {
+	row := s.db.QueryRowContext(
+		ctx,
+		`SELECT 
+			id,
+			url,
+			COALESCE(normalized_url, ''),
+			COALESCE(host, ''),
+			COALESCE(page_type, ''),
+			is_alias,
+			COALESCE(canonical_url, '')
+		FROM
+			sources
+		WHERE
+			host = $1
+			AND is_alias = FALSE
+			AND is_job_site = TRUE
+			AND page_type IN ('career_root', 'job_list')
+		ORDER BY
+			discovered_at ASC
+		LIMIT 1`,
+		host,
+	)
+
+	var src Source
+	if err := row.Scan(
+		&src.ID,
+		&src.URL,
+		&src.NormalizedURL,
+		&src.Host,
+		&src.PageType,
+		&src.IsAlias,
+		&src.CanonicalURL,
+	); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &src, nil
+}
+
+func (s *Store) MarkSourceAlias(ctx context.Context, sourceID int, canonicalURL string) error {
+	_, err := s.db.ExecContext(
+		ctx,
+		`UPDATE
+			sources
+		SET
+			is_alias = TRUE,
+			canonical_url = NULLIF($1, ''),
+			last_checked_at = NOW()
+		WHERE
+			id = $2`,
+		canonicalURL,
+		sourceID,
+	)
+	return err
+}
+
+func (s *Store) ResolveCanonicalSource(ctx context.Context, normalizedURL, host, pageType string) (string, bool, error) {
+	if pageType != urlutil.PageTypeCareerRoot && pageType != urlutil.PageTypeJobList {
+		return normalizedURL, false, nil
+	}
+	if host == "" {
+		return normalizedURL, false, nil
+	}
+
+	existing, err := s.GetCanonicalSourceByHost(ctx, host)
+	if err != nil {
+		return normalizedURL, false, err
+	}
+	if existing == nil {
+		return normalizedURL, false, nil
+	}
+
+	existingPriority := urlutil.CareerRootPriority(existing.URL)
+	newPriority := urlutil.CareerRootPriority(normalizedURL)
+	if existingPriority <= newPriority {
+		return existing.URL, true, nil
+	}
+
+	if err := s.MarkSourceAlias(ctx, existing.ID, normalizedURL); err != nil {
+		return normalizedURL, false, err
+	}
+	return normalizedURL, false, nil
+}
+
+func (s *Store) MarkSourceError(ctx context.Context, sourceID int, errType, message string) error {
+	_, err := s.db.ExecContext(
+		ctx,
+		`UPDATE
+			sources
+		SET
+			last_error_type = $1,
+			last_error_message = $2,
+			last_error_at = NOW(),
+			last_checked_at = NOW()
+		WHERE
+			id = $3`,
+		errType,
+		truncateString(message, 800),
+		sourceID,
+	)
+	return err
+}
+
+func (s *Store) MarkSourceErrorByURL(ctx context.Context, rawURL, errType, message string) error {
+	_, err := s.db.ExecContext(
+		ctx,
+		`UPDATE
+			sources
+		SET
+			last_error_type = $1,
+			last_error_message = $2,
+			last_error_at = NOW(),
+			last_checked_at = NOW()
+		WHERE
+			normalized_url = $3
+			OR url = $3`,
+		errType,
+		truncateString(message, 800),
+		rawURL,
+	)
+	return err
+}
+
+func (s *Store) ClearSourceError(ctx context.Context, sourceID int) error {
+	_, err := s.db.ExecContext(
+		ctx,
+		`UPDATE
+			sources
+		SET
+			last_error_type = NULL,
+			last_error_message = NULL,
+			last_error_at = NULL
+		WHERE
+			id = $1`,
+		sourceID,
+	)
 	return err
 }
 
@@ -542,4 +817,36 @@ func (s *Store) DeleteOldJobs(ctx context.Context, olderThan time.Duration) (int
 		return 0, err
 	}
 	return res.RowsAffected()
+}
+
+func (s *Store) GetStatsCounts(ctx context.Context) (sourcesTotal, jobsTotal, activeJobs int, err error) {
+	if err = s.db.QueryRowContext(
+		ctx,
+		`SELECT COUNT(*) FROM sources WHERE is_job_site = TRUE AND is_alias = FALSE AND page_type IN ('career_root', 'job_list')`,
+	).Scan(&sourcesTotal); err != nil {
+		return 0, 0, 0, err
+	}
+
+	if err = s.db.QueryRowContext(
+		ctx,
+		`SELECT COUNT(*) FROM jobs`,
+	).Scan(&jobsTotal); err != nil {
+		return 0, 0, 0, err
+	}
+
+	if err = s.db.QueryRowContext(
+		ctx,
+		`SELECT COUNT(*) FROM jobs WHERE rejected = FALSE AND closed = FALSE`,
+	).Scan(&activeJobs); err != nil {
+		return 0, 0, 0, err
+	}
+
+	return sourcesTotal, jobsTotal, activeJobs, nil
+}
+
+func truncateString(s string, max int) string {
+	if max <= 0 || len(s) <= max {
+		return s
+	}
+	return s[:max]
 }

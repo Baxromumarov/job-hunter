@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/baxromumarov/job-hunter/internal/ai"
+	"github.com/baxromumarov/job-hunter/internal/observability"
 )
 
 type ClassifierService struct {
@@ -23,6 +24,7 @@ func (s *ClassifierService) Classify(ctx context.Context, url, title, meta, text
 		TextSample:      text,
 	}
 
+	observability.IncAICall("classifier")
 	result, err := s.aiClient.ClassifyWebsite(ctx, data)
 	if err != nil {
 		return nil, fmt.Errorf("classification failed: %w", err)
@@ -45,6 +47,7 @@ func (s *MatcherService) Match(ctx context.Context, jobTitle, jobDesc string, pr
 		Description: jobDesc,
 	}
 
+	observability.IncAICall("matcher")
 	result, err := s.aiClient.MatchJob(ctx, jobData, profile)
 	if err != nil {
 		return nil, fmt.Errorf("matching failed: %w", err)

@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -15,6 +15,9 @@ import (
 )
 
 func main() {
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	slog.SetDefault(logger)
+
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
 		dbURL = "postgres://postgres:postgres@localhost:5432/jobhunterdb?sslmode=disable"
@@ -22,7 +25,8 @@ func main() {
 
 	dbStore, err := store.NewStore(dbURL)
 	if err != nil {
-		log.Fatalf("Failed to connect to store: %v", err)
+		slog.Error("failed to connect to store", "error", err)
+		os.Exit(1)
 	}
 	defer dbStore.Close()
 
@@ -30,7 +34,8 @@ func main() {
 	workDir, _ := os.Getwd()
 	schemaPath := filepath.Join(workDir, "internal", "store", "schema.sql")
 	if err := dbStore.RunMigrations(schemaPath); err != nil {
-		log.Fatalf("Failed to run migrations: %v", err)
+		slog.Error("failed to run migrations", "error", err)
+		os.Exit(1)
 	}
 
 	// Initialize AI Client (auto-detects provider from GEMINI_API_KEY env var)
@@ -58,8 +63,9 @@ func main() {
 		port = "8080"
 	}
 
-	log.Printf("Starting server on port %s", port)
+	slog.Info("starting server", "port", port)
 	if err := http.ListenAndServe(":"+port, srv.Router()); err != nil {
-		log.Fatalf("Server failed: %v", err)
+		slog.Error("server failed", "error", err)
+		os.Exit(1)
 	}
 }

@@ -3,6 +3,7 @@ package scraper
 import (
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -22,6 +23,15 @@ func NewGreenhouseScraper(baseURL string) *GreenhouseScraper {
 }
 
 func (g *GreenhouseScraper) FetchJobs(since time.Time) ([]RawJob, error) {
+	parsed, err := url.Parse(g.base)
+	if err != nil {
+		return nil, fmt.Errorf("greenhouse parse url failed: %w", err)
+	}
+	if strings.Trim(parsed.Path, "/") == "" {
+		// Skip platform root pages that are not a company board.
+		return nil, nil
+	}
+
 	url := g.normalizeURL(g.base)
 	resp, err := g.client.Get(url)
 	if err != nil {
@@ -57,13 +67,13 @@ func (g *GreenhouseScraper) FetchJobs(since time.Time) ([]RawJob, error) {
 			Description: title,
 			Company:     companyFromGreenhouse(jobURL),
 			Location:    location,
-			PostedAt:    time.Now(),
+			PostedAt:    time.Time{},
 		})
 	})
 
 	filtered := make([]RawJob, 0, len(jobs))
 	for _, j := range jobs {
-		if j.PostedAt.Before(since) {
+		if !j.PostedAt.IsZero() && j.PostedAt.Before(since) {
 			continue
 		}
 		filtered = append(filtered, j)

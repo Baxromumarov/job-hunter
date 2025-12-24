@@ -9,7 +9,11 @@ import (
 	"path"
 	"strings"
 
+	"log/slog"
+
 	"github.com/baxromumarov/job-hunter/internal/httpx"
+	"github.com/baxromumarov/job-hunter/internal/observability"
+	"github.com/baxromumarov/job-hunter/internal/urlutil"
 	"github.com/gocolly/colly/v2"
 )
 
@@ -73,8 +77,9 @@ func (c *crawler) collectLinksFromPage(ctx context.Context, target string) []str
 	}
 
 	seen := make(map[string]struct{})
+	var atsLinks []string
 	var links []string
-	_ = c.fetcher.Fetch(ctx, target, func(col *colly.Collector) {
+	if err := c.fetcher.Fetch(ctx, target, func(col *colly.Collector) {
 		col.OnHTML("a[href]", func(e *colly.HTMLElement) {
 			href := e.Attr("href")
 			if href == "" {
@@ -84,30 +89,32 @@ func (c *crawler) collectLinksFromPage(ctx context.Context, target string) []str
 			if resolved == "" {
 				return
 			}
-			if isATSLink(resolved) {
-				if _, ok := seen[resolved]; ok {
-					return
-				}
-				seen[resolved] = struct{}{}
-				links = append(links, resolved)
-				return
-			}
-
-			lower := strings.ToLower(href + " " + e.Text)
-			if !strings.Contains(lower, "career") &&
-				!strings.Contains(lower, "job") &&
-				!strings.Contains(lower, "opening") &&
-				!strings.Contains(lower, "position") {
-				return
-			}
 			if _, ok := seen[resolved]; ok {
 				return
 			}
 			seen[resolved] = struct{}{}
+
+			if urlutil.IsATSHost(hostFromURL(resolved)) {
+				atsLinks = append(atsLinks, resolved)
+				return
+			}
+
+			if !urlutil.IsDiscoveryEligible(resolved) {
+				return
+			}
+
 			links = append(links, resolved)
 		})
-	})
+	}); err != nil {
+		observability.IncError(observability.ClassifyFetchError(err), "discovery")
+		slog.Debug("discovery page fetch failed", "url", target, "error", err)
+		return links
+	}
+	observability.IncPagesCrawled("discovery")
 
+	if len(atsLinks) > 0 {
+		return atsLinks
+	}
 	return links
 }
 
@@ -151,16 +158,24 @@ func parseSitemaps(ctx context.Context, fetcher *httpx.CollyFetcher, base *url.U
 	for _, sm := range candidates {
 		body, status, err := fetcher.FetchBytes(ctx, sm)
 		if err != nil || status != http.StatusOK || len(body) == 0 {
+			if err != nil {
+				observability.IncError(observability.ClassifyFetchError(err), "discovery")
+			}
 			continue
 		}
+		observability.IncPagesCrawled("discovery")
 
 		var idx sitemapIndex
 		if err := xml.NewDecoder(bytes.NewReader(body)).Decode(&idx); err == nil && len(idx.Locations) > 0 {
 			for _, loc := range idx.Locations {
 				childBody, childStatus, err := fetcher.FetchBytes(ctx, loc.Loc)
 				if err != nil || childStatus != http.StatusOK || len(childBody) == 0 {
+					if err != nil {
+						observability.IncError(observability.ClassifyFetchError(err), "discovery")
+					}
 					continue
 				}
+				observability.IncPagesCrawled("discovery")
 				var u urlset
 				if err := xml.NewDecoder(bytes.NewReader(childBody)).Decode(&u); err == nil {
 					for _, link := range u.URLs {
@@ -199,16 +214,6 @@ func acceptSitemapURL(u string) bool {
 		strings.Contains(l, "position")
 }
 
-func isATSLink(link string) bool {
-	hosts := []string{"boards.greenhouse.io", "jobs.lever.co", "jobs.ashbyhq.com", ".workable.com"}
-	for _, h := range hosts {
-		if strings.Contains(link, h) {
-			return true
-		}
-	}
-	return false
-}
-
 func resolveLink(base *url.URL, href string) string {
 	if strings.HasPrefix(href, "mailto:") || strings.HasPrefix(href, "tel:") {
 		return ""
@@ -224,4 +229,12 @@ func resolveLink(base *url.URL, href string) string {
 		u.Scheme = "https"
 	}
 	return u.String()
+}
+
+func hostFromURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	return u.Hostname()
 }

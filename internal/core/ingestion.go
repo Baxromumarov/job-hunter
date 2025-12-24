@@ -2,13 +2,14 @@ package core
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"net/url"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/baxromumarov/job-hunter/internal/ai"
+	"github.com/baxromumarov/job-hunter/internal/observability"
 	"github.com/baxromumarov/job-hunter/internal/scraper"
 	"github.com/baxromumarov/job-hunter/internal/store"
 	"golang.org/x/sync/errgroup"
@@ -64,7 +65,8 @@ func (s *IngestionService) scrapeLoop(ctx context.Context, interval time.Duratio
 func (s *IngestionService) scrapeOnce(ctx context.Context) {
 	sources, _, err := s.store.ListSources(ctx, 200, 0)
 	if err != nil {
-		log.Printf("Ingestion: failed to list sources: %v", err)
+		observability.IncError(observability.ErrorStore, "ingestion")
+		slog.Error("ingestion list sources failed", "error", err)
 		return
 	}
 
@@ -117,11 +119,12 @@ func (s *IngestionService) cleanupLoop(ctx context.Context, interval, retention 
 func (s *IngestionService) cleanup(ctx context.Context, retention time.Duration) {
 	deleted, err := s.store.DeleteOldJobs(ctx, retention)
 	if err != nil {
-		log.Printf("Ingestion: cleanup failed: %v", err)
+		observability.IncError(observability.ErrorStore, "ingestion")
+		slog.Error("ingestion cleanup failed", "error", err)
 		return
 	}
 	if deleted > 0 {
-		log.Printf("Ingestion: cleanup removed %d expired jobs", deleted)
+		slog.Info("ingestion cleanup removed expired jobs", "count", deleted)
 	}
 }
 
@@ -133,7 +136,8 @@ func (s *IngestionService) scoreJob(ctx context.Context, title, description stri
 
 	match, err := s.matcher.Match(ctx, title, description, s.profile)
 	if err != nil {
-		log.Printf("Ingestion: AI match failed, using rule score only: %v", err)
+		observability.IncError(observability.ErrorAI, "ingestion")
+		slog.Warn("ingestion ai match failed", "error", err)
 		return ruleScore, "Rule-based match only"
 	}
 
@@ -201,9 +205,13 @@ func (s *IngestionService) pickScraper(rawURL, sourceType string) scraper.JobScr
 }
 
 func (s *IngestionService) processSource(ctx context.Context, src store.Source, since time.Time) {
+	start := time.Now()
+	defer observability.ObserveCrawlDuration(src.Type, time.Since(start).Seconds())
+
 	limiter := s.hostLimiter(src.URL)
 	if limiter != nil {
 		if err := limiter.Wait(ctx); err != nil {
+			observability.IncError(observability.ErrorRateLimit, "ingestion")
 			return
 		}
 	}
@@ -211,7 +219,10 @@ func (s *IngestionService) processSource(ctx context.Context, src store.Source, 
 	scr := s.pickScraper(src.URL, src.Type)
 	rawJobs, err := scr.FetchJobs(since)
 	if err != nil {
-		log.Printf("Ingestion: scrape failed for %s: %v", src.URL, err)
+		errType := observability.ClassifyScrapeError(err)
+		observability.IncError(errType, "ingestion")
+		_ = s.store.MarkSourceError(ctx, src.ID, errType, err.Error())
+		slog.Error("ingestion scrape failed", "url", src.URL, "error", err)
 		return
 	}
 
@@ -256,13 +267,20 @@ func (s *IngestionService) processSource(ctx context.Context, src store.Source, 
 		}
 
 		if err := s.store.SaveJob(ctx, job); err != nil {
-			log.Printf("Ingestion: failed to save job %s: %v", raw.URL, err)
+			observability.IncError(observability.ErrorStore, "ingestion")
+			_ = s.store.MarkSourceError(ctx, src.ID, observability.ErrorStore, err.Error())
+			slog.Error("ingestion save job failed", "url", raw.URL, "error", err)
+			continue
 		}
+		observability.IncJobsDiscovered(src.Type)
 	}
 
 	if err := s.store.MarkSourceScraped(ctx, src.ID); err != nil {
-		log.Printf("Ingestion: failed to mark source %d scraped: %v", src.ID, err)
+		observability.IncError(observability.ErrorStore, "ingestion")
+		slog.Error("ingestion mark source scraped failed", "source_id", src.ID, "error", err)
+		return
 	}
+	_ = s.store.ClearSourceError(ctx, src.ID)
 }
 
 func (s *IngestionService) hostLimiter(rawURL string) *rate.Limiter {

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/baxromumarov/job-hunter/internal/httpx"
+	"github.com/baxromumarov/job-hunter/internal/observability"
 	"github.com/gocolly/colly/v2"
 )
 
@@ -15,7 +16,7 @@ func duckDuckSearch(ctx context.Context, query string, limit int) []string {
 	reqURL := "https://duckduckgo.com/html/?q=" + url.QueryEscape(query)
 
 	var urls []string
-	_ = fetcher.Fetch(ctx, reqURL, func(c *colly.Collector) {
+	if err := fetcher.Fetch(ctx, reqURL, func(c *colly.Collector) {
 		c.OnHTML("a[href]", func(e *colly.HTMLElement) {
 			if limit > 0 && len(urls) >= limit {
 				e.Request.Abort()
@@ -42,7 +43,11 @@ func duckDuckSearch(ctx context.Context, query string, limit int) []string {
 
 			urls = append(urls, href)
 		})
-	})
+	}); err != nil {
+		observability.IncError(observability.ClassifyFetchError(err), "discovery")
+		return urls
+	}
+	observability.IncPagesCrawled("discovery")
 
 	return urls
 }

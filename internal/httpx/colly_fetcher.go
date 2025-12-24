@@ -30,6 +30,22 @@ type hostPolicy struct {
 	mu          sync.Mutex
 }
 
+type FetchError struct {
+	Status int
+	Err    error
+}
+
+func (e *FetchError) Error() string {
+	if e.Err == nil {
+		return fmt.Sprintf("fetch error (status %d)", e.Status)
+	}
+	return fmt.Sprintf("fetch error (status %d): %v", e.Status, e.Err)
+}
+
+func (e *FetchError) Unwrap() error {
+	return e.Err
+}
+
 func NewCollyFetcher(userAgent string) *CollyFetcher {
 	if userAgent == "" {
 		userAgent = "job-hunter-bot/1.0"
@@ -101,7 +117,7 @@ func (f *CollyFetcher) fetchWithRetry(ctx context.Context, rawURL string, regist
 	if lastErr == nil {
 		lastErr = errors.New("colly fetch failed")
 	}
-	return status, lastErr
+	return status, &FetchError{Status: status, Err: lastErr}
 }
 
 func (f *CollyFetcher) fetchOnce(ctx context.Context, target string, register func(*colly.Collector)) (int, error) {

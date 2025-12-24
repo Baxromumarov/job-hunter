@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -35,6 +36,15 @@ func NewLeverScraper(baseURL string) *LeverScraper {
 }
 
 func (l *LeverScraper) FetchJobs(since time.Time) ([]RawJob, error) {
+	parsed, err := url.Parse(l.base)
+	if err != nil {
+		return nil, fmt.Errorf("lever parse url failed: %w", err)
+	}
+	if strings.Trim(parsed.Path, "/") == "" {
+		// Skip platform root pages that do not represent a specific company board.
+		return nil, nil
+	}
+
 	apiURL := strings.TrimSuffix(l.base, "/")
 	if !strings.Contains(apiURL, "?mode=json") {
 		apiURL += "?mode=json"
