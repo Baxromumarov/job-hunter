@@ -3,9 +3,11 @@ package scraper
 import (
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
+	"github.com/PuerkitoBio/goquery"
 	"golang.org/x/net/html"
 )
 
@@ -22,9 +24,6 @@ func NewGenericScraper(baseURL string) *GenericScraper {
 }
 
 func (s *GenericScraper) FetchJobs(since time.Time) ([]RawJob, error) {
-	// This is a placeholder implementation that would normally parse the specific site structure
-	// For now, we will simulated returning a job if we can connect to the URL
-
 	resp, err := s.client.Get(s.BaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch %s: %w", s.BaseURL, err)
@@ -35,19 +34,56 @@ func (s *GenericScraper) FetchJobs(since time.Time) ([]RawJob, error) {
 		return nil, fmt.Errorf("received status %d from %s", resp.StatusCode, s.BaseURL)
 	}
 
-	// In a real implementation, we would parse the HTML response body here
-	// using goquery or html package.
-	// Returning a dummy job for demonstration purposes.
+	doc, err := goquery.NewDocumentFromReader(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse %s: %w", s.BaseURL, err)
+	}
 
-	jobs := []RawJob{
-		{
-			URL:         s.BaseURL + "/job/123",
-			Title:       "Software Engineer",
-			Description: "We are looking for a Go developer...",
-			Company:     "Example Corp",
-			Location:    "Remote",
+	base, _ := url.Parse(s.BaseURL)
+	seen := make(map[string]struct{})
+	var jobs []RawJob
+
+	doc.Find("a").Each(func(_ int, a *goquery.Selection) {
+		href, ok := a.Attr("href")
+		if !ok || href == "" {
+			return
+		}
+
+		lower := strings.ToLower(href + " " + strings.TrimSpace(a.Text()))
+		if !strings.Contains(lower, "job") && !strings.Contains(lower, "career") && !strings.Contains(lower, "opening") {
+			return
+		}
+
+		resolved := resolveLink(base, href)
+		if resolved == "" {
+			return
+		}
+		if _, exists := seen[resolved]; exists {
+			return
+		}
+
+		title := strings.TrimSpace(a.Text())
+		if title == "" {
+			title = pathTitleFromURL(resolved)
+		}
+		if title == "" {
+			return
+		}
+
+		seen[resolved] = struct{}{}
+		jobs = append(jobs, RawJob{
+			URL:         resolved,
+			Title:       title,
+			Description: title,
+			Company:     hostCompany(base),
+			Location:    "Remote/Unknown",
 			PostedAt:    time.Now(),
-		},
+		})
+	})
+
+	// keep the most recent subset to avoid flooding
+	if len(jobs) > 20 {
+		jobs = jobs[:20]
 	}
 
 	return jobs, nil
@@ -63,4 +99,43 @@ func ExtractText(n *html.Node) string {
 		sb.WriteString(ExtractText(c))
 	}
 	return sb.String()
+}
+
+func resolveLink(base *url.URL, href string) string {
+	if strings.HasPrefix(href, "mailto:") || strings.HasPrefix(href, "tel:") {
+		return ""
+	}
+	u, err := url.Parse(href)
+	if err != nil {
+		return ""
+	}
+	if base != nil {
+		u = base.ResolveReference(u)
+	}
+	if u.Scheme == "" {
+		u.Scheme = "https"
+	}
+	return u.String()
+}
+
+func pathTitleFromURL(u string) string {
+	parts := strings.Split(u, "/")
+	for i := len(parts) - 1; i >= 0; i-- {
+		p := strings.TrimSpace(parts[i])
+		if p == "" {
+			continue
+		}
+		p = strings.ReplaceAll(p, "-", " ")
+		p = strings.ReplaceAll(p, "_", " ")
+		return strings.Title(p)
+	}
+	return ""
+}
+
+func hostCompany(base *url.URL) string {
+	if base == nil {
+		return "Unknown"
+	}
+	host := strings.TrimPrefix(base.Host, "www.")
+	return host
 }

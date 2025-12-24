@@ -33,8 +33,8 @@ func main() {
 		log.Fatalf("Failed to run migrations: %v", err)
 	}
 
-	// Initialize AI Client
-	aiClient := ai.NewMockClient()
+	// Initialize AI Client (auto-detects provider from GEMINI_API_KEY env var)
+	aiClient := ai.NewClient()
 
 	// Initialize Core Services
 	classifier := core.NewClassifierService(aiClient)

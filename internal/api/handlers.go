@@ -14,7 +14,7 @@ import (
 func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	limit, offset := parsePagination(r, 20)
 
-	jobs, err := s.store.GetJobs(r.Context(), limit, offset)
+	jobs, total, err := s.store.GetJobs(r.Context(), limit, offset)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "Failed to fetch jobs: "+err.Error())
 		return
@@ -27,13 +27,14 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		"items":  jobs,
 		"limit":  limit,
 		"offset": offset,
+		"total":  total,
 	})
 }
 
 func (s *Server) handleListSources(w http.ResponseWriter, r *http.Request) {
 	limit, offset := parsePagination(r, 20)
 
-	sources, err := s.store.ListSources(r.Context(), limit, offset)
+	sources, total, err := s.store.ListSources(r.Context(), limit, offset)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "Failed to fetch sources: "+err.Error())
 		return
@@ -45,6 +46,7 @@ func (s *Server) handleListSources(w http.ResponseWriter, r *http.Request) {
 		"items":  sources,
 		"limit":  limit,
 		"offset": offset,
+		"total":  total,
 	})
 }
 
@@ -104,13 +106,19 @@ func (s *Server) handleAddSource(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Save source to DB
-	_, err = s.store.AddSource(r.Context(), req.URL, req.SourceType, classification.IsJobSite, classification.TechRelated, classification.Confidence, classification.Reason)
+	_, existed, err := s.store.AddSource(r.Context(), req.URL, req.SourceType, classification.IsJobSite, classification.TechRelated, classification.Confidence, classification.Reason)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "Failed to save source: "+err.Error())
 		return
 	}
 
-	respondJSON(w, http.StatusOK, classification)
+	respondJSON(w, http.StatusOK, map[string]interface{}{
+		"is_job_site":  classification.IsJobSite,
+		"tech_related": classification.TechRelated,
+		"confidence":   classification.Confidence,
+		"reason":       classification.Reason,
+		"existed":      existed,
+	})
 }
 
 func (s *Server) handleApplyJob(w http.ResponseWriter, r *http.Request) {

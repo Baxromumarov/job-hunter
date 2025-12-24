@@ -50,6 +50,8 @@ func (e *Engine) StartDiscovery(ctx context.Context) {
 
 	go func() {
 		e.runCycle(ctx)
+		e.crawlForCareerLinks(ctx)
+		e.searchWeb(ctx)
 
 		ticker := time.NewTicker(1 * time.Hour)
 		defer ticker.Stop()
@@ -59,6 +61,8 @@ func (e *Engine) StartDiscovery(ctx context.Context) {
 				return
 			case <-ticker.C:
 				e.runCycle(ctx)
+				e.crawlForCareerLinks(ctx)
+				e.searchWeb(ctx)
 			}
 		}
 	}()
@@ -75,6 +79,59 @@ func (e *Engine) runCycle(ctx context.Context) {
 		}
 	}
 	log.Println("Discovery: cycle complete")
+}
+
+func (e *Engine) crawlForCareerLinks(ctx context.Context) {
+	sites := []string{
+		"https://github.com",
+		"https://about.gitlab.com",
+		"https://www.heroku.com",
+		"https://www.cloudflare.com",
+		"https://www.vercel.com",
+		"https://www.supabase.com",
+		"https://www.datadoghq.com",
+		"https://www.zendesk.com",
+	}
+
+	c := newCrawler()
+	for _, site := range sites {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		links := c.extractCareerLinks(ctx, site)
+		for _, link := range links {
+			e.processCandidate(ctx, candidateSource{
+				URL:        link,
+				SourceType: guessSourceType(link),
+			})
+		}
+	}
+}
+
+func (e *Engine) searchWeb(ctx context.Context) {
+	queries := []string{
+		"golang backend engineer jobs",
+		"software engineer careers site:careers",
+		"backend jobs site:jobs",
+		"remote golang hiring",
+	}
+
+	seen := make(map[string]struct{})
+	for _, q := range queries {
+		urls := duckDuckSearch(ctx, q, 15)
+		for _, u := range urls {
+			if _, ok := seen[u]; ok {
+				continue
+			}
+			seen[u] = struct{}{}
+			e.processCandidate(ctx, candidateSource{
+				URL:        u,
+				SourceType: guessSourceType(u),
+			})
+		}
+	}
 }
 
 func (e *Engine) processCandidate(ctx context.Context, c candidateSource) {
@@ -109,13 +166,17 @@ func (e *Engine) processCandidate(ctx context.Context, c candidateSource) {
 			sourceType = guessSourceType(c.URL)
 		}
 
-		id, err := e.store.AddSource(ctx, c.URL, sourceType, classification.IsJobSite, classification.TechRelated, classification.Confidence, classification.Reason)
+		id, existed, err := e.store.AddSource(ctx, c.URL, sourceType, classification.IsJobSite, classification.TechRelated, classification.Confidence, classification.Reason)
 		if err != nil {
 			log.Printf("Failed to store source %s: %v", c.URL, err)
 		} else {
-			log.Printf("Discovery: APPROVED source %s (ID: %d)", c.URL, id)
-			// Trigger job scraping for this new source (Mocked for now)
-			e.mockScrapeJobs(ctx, id, c)
+			if existed {
+				log.Printf("Discovery: source already exists %s (ID: %d)", c.URL, id)
+			} else {
+				log.Printf("Discovery: APPROVED source %s (ID: %d)", c.URL, id)
+				// Trigger job scraping for this new source (Mocked for now)
+				e.mockScrapeJobs(ctx, id, c)
+			}
 		}
 	} else {
 		log.Printf("Discovery: REJECTED source %s (Confidence: %.2f)", c.URL, classification.Confidence)

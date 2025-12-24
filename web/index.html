@@ -31,11 +31,13 @@
             </div>
             <div class="input-group">
                 <input type="text" id="sourceUrl" placeholder="https://company.com/careers">
-                <select id="sourceType">
-                    <option value="job_board">Job board</option>
-                    <option value="company_page">Company careers</option>
-                    <option value="unknown">Auto detect</option>
-                </select>
+                <div class="select-wrap">
+                    <select id="sourceType">
+                        <option value="job_board">Job board</option>
+                        <option value="company_page">Company careers</option>
+                        <option value="unknown">Auto detect</option>
+                    </select>
+                </div>
                 <button onclick="addSource()">Add Source</button>
             </div>
             <div id="analysisResult" class="result-box hidden"></div>

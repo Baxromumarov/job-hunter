@@ -57,6 +57,22 @@ func clampLimit(limit int, defaultLimit, maxLimit int) int {
 	return limit
 }
 
+func normalizePagination(limit, offset int) (int, int) {
+	limit = clampLimit(limit, 20, 200)
+	if offset < 0 {
+		offset = 0
+	}
+	return limit, offset
+}
+
+func scanNullTime(nt sql.NullTime) *time.Time {
+	if !nt.Valid {
+		return nil
+	}
+	t := nt.Time
+	return &t
+}
+
 type Source struct {
 	ID             int        `json:"id"`
 	URL            string     `json:"url"`
@@ -88,10 +104,12 @@ type Job struct {
 	CreatedAt    time.Time  `json:"created_at"`
 }
 
-func (s *Store) GetJobs(ctx context.Context, limit, offset int) ([]Job, error) {
-	limit = clampLimit(limit, 20, 200)
-	if offset < 0 {
-		offset = 0
+func (s *Store) GetJobs(ctx context.Context, limit, offset int) ([]Job, int, error) {
+	limit, offset = normalizePagination(limit, offset)
+
+	var total int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM jobs`).Scan(&total); err != nil {
+		return nil, 0, err
 	}
 
 	rows, err := s.db.QueryContext(ctx, `
@@ -117,7 +135,7 @@ ORDER BY j.applied ASC, j.match_score DESC, COALESCE(j.posted_at, j.created_at) 
 LIMIT $1 OFFSET $2
 `, limit, offset)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 
@@ -149,34 +167,30 @@ LIMIT $1 OFFSET $2
 			&j.Description,
 			&createdAt,
 		); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 
-		j.CreatedAt = createdAt
 		if sourceURL.Valid {
 			j.SourceURL = sourceURL.String
 		}
 		if sourceType.Valid {
 			j.SourceType = sourceType.String
 		}
-		if appliedAt.Valid {
-			t := appliedAt.Time
-			j.AppliedAt = &t
-		}
-		if postedAt.Valid {
-			t := postedAt.Time
-			j.PostedAt = &t
-		}
+		j.AppliedAt = scanNullTime(appliedAt)
+		j.PostedAt = scanNullTime(postedAt)
+		j.CreatedAt = createdAt
 
 		jobs = append(jobs, j)
 	}
-	return jobs, rows.Err()
+	return jobs, total, rows.Err()
 }
 
-func (s *Store) ListSources(ctx context.Context, limit, offset int) ([]Source, error) {
-	limit = clampLimit(limit, 20, 200)
-	if offset < 0 {
-		offset = 0
+func (s *Store) ListSources(ctx context.Context, limit, offset int) ([]Source, int, error) {
+	limit, offset = normalizePagination(limit, offset)
+
+	var total int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sources WHERE is_job_site = TRUE`).Scan(&total); err != nil {
+		return nil, 0, err
 	}
 
 	rows, err := s.db.QueryContext(ctx, `
@@ -187,7 +201,7 @@ ORDER BY last_scraped_at NULLS FIRST, last_checked_at NULLS FIRST
 LIMIT $1 OFFSET $2
 `, limit, offset)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 
@@ -212,31 +226,29 @@ LIMIT $1 OFFSET $2
 			&discoveredAt,
 			&src.Classification,
 		); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 
-		if lastChecked.Valid {
-			t := lastChecked.Time
-			src.LastCheckedAt = &t
-		}
-		if lastScraped.Valid {
-			t := lastScraped.Time
-			src.LastScrapedAt = &t
-		}
-		if discoveredAt.Valid {
-			t := discoveredAt.Time
-			src.DiscoveredAt = &t
-		}
+		src.LastCheckedAt = scanNullTime(lastChecked)
+		src.LastScrapedAt = scanNullTime(lastScraped)
+		src.DiscoveredAt = scanNullTime(discoveredAt)
 
 		sources = append(sources, src)
 	}
 
-	return sources, rows.Err()
+	return sources, total, rows.Err()
 }
 
-func (s *Store) AddSource(ctx context.Context, url, sourceType string, isJobSite, techRelated bool, confidence float64, reason string) (int, error) {
-	var id int
-	err := s.db.QueryRowContext(ctx, `
+func (s *Store) AddSource(ctx context.Context, url, sourceType string, isJobSite, techRelated bool, confidence float64, reason string) (id int, existed bool, err error) {
+	var existingID sql.NullInt64
+	if err = s.db.QueryRowContext(ctx, `SELECT id FROM sources WHERE url = $1`, url).Scan(&existingID); err != nil && err != sql.ErrNoRows {
+		return 0, false, err
+	}
+	if existingID.Valid {
+		existed = true
+	}
+
+	err = s.db.QueryRowContext(ctx, `
 INSERT INTO sources (url, type, is_job_site, tech_related, confidence, classification_reason, last_checked_at, discovered_at)
 VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
 ON CONFLICT (url) DO UPDATE SET
@@ -248,7 +260,7 @@ ON CONFLICT (url) DO UPDATE SET
     last_checked_at = NOW()
 RETURNING id
 `, url, sourceType, isJobSite, techRelated, confidence, reason).Scan(&id)
-	return id, err
+	return id, existed, err
 }
 
 func (s *Store) MarkSourceScraped(ctx context.Context, sourceID int) error {

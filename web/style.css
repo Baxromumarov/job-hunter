@@ -114,17 +114,17 @@ p {
 }
 
 .input-group {
-    display: grid;
-    grid-template-columns: 1.3fr 0.7fr auto;
+    display: flex;
     gap: 10px;
     align-items: center;
     margin: 16px 0;
+    flex-wrap: wrap;
 }
 
 input,
 select {
-    width: 100%;
-    padding: 12px;
+    flex: 1;
+    padding: 14px 16px;
     border: 1px solid var(--border);
     border-radius: 12px;
     font-size: 15px;
@@ -133,15 +133,21 @@ select {
 }
 
 select {
+    flex: 0 0 220px;
     background: rgba(255, 255, 255, 0.08);
+    appearance: none;
+    -moz-appearance: none;
+    -webkit-appearance: none;
+    padding-right: 36px;
+    position: relative;
 }
 
 button {
     background: var(--primary);
     color: white;
     border: none;
-    padding: 12px 18px;
-    border-radius: 10px;
+    padding: 14px 20px;
+    border-radius: 12px;
     cursor: pointer;
     font-size: 15px;
     font-weight: 600;
@@ -175,6 +181,46 @@ button.ghost {
     margin-top: 12px;
 }
 
+.alert {
+    border-radius: 12px;
+    padding: 14px 16px;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    background: linear-gradient(135deg, rgba(34, 211, 238, 0.08), rgba(109, 40, 217, 0.14));
+    color: #e2e8f0;
+}
+
+.alert.success {
+    background: linear-gradient(135deg, rgba(34, 211, 238, 0.12), rgba(34, 197, 94, 0.12));
+    border-color: rgba(34, 197, 94, 0.3);
+}
+
+.alert.error {
+    background: linear-gradient(135deg, rgba(248, 113, 113, 0.15), rgba(109, 40, 217, 0.08));
+    border-color: rgba(248, 113, 113, 0.4);
+}
+
+.pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    border-radius: 999px;
+    font-weight: 700;
+    font-size: 0.9rem;
+}
+
+.pill.success {
+    background: rgba(34, 197, 94, 0.18);
+    color: #bbf7d0;
+    border: 1px solid rgba(34, 197, 94, 0.4);
+}
+
+.pill.error {
+    background: rgba(248, 113, 113, 0.18);
+    color: #fecdd3;
+    border: 1px solid rgba(248, 113, 113, 0.4);
+}
+
 .sources-list {
     display: grid;
     gap: 12px;
@@ -186,9 +232,9 @@ button.ghost {
     align-items: center;
     gap: 12px;
     padding: 14px;
-    border: 1px solid var(--border);
+    border: 1px solid rgba(255, 255, 255, 0.12);
     border-radius: 12px;
-    background: var(--card);
+    background: linear-gradient(135deg, rgba(34, 211, 238, 0.06), rgba(109, 40, 217, 0.1));
     color: var(--text);
 }
 
@@ -198,7 +244,7 @@ button.ghost {
 }
 
 .source-row .info strong {
-    color: var(--text);
+    color: #e0f2fe;
 }
 
 .source-row .info .hint {
@@ -226,6 +272,19 @@ button.ghost {
 .status.rejected {
     background: rgba(248, 113, 113, 0.18);
     color: #fecdd3;
+}
+
+.chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    border-radius: 999px;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    background: linear-gradient(135deg, rgba(34, 211, 238, 0.15), rgba(109, 40, 217, 0.25));
+    color: #e0f2fe;
+    font-weight: 600;
+    font-size: 0.85rem;
 }
 
 .modal {
@@ -413,4 +472,18 @@ a {
 
 a:hover {
     text-decoration: underline;
+}
+.select-wrap {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+}
+
+.select-wrap::after {
+    content: '⌄';
+    position: absolute;
+    right: 12px;
+    color: var(--muted);
+    pointer-events: none;
+    font-size: 14px;
 }

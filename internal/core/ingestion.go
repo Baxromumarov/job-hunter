@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"log"
+	"net/url"
 	"strings"
 	"time"
 
@@ -53,7 +54,7 @@ func (s *IngestionService) scrapeLoop(ctx context.Context, interval time.Duratio
 }
 
 func (s *IngestionService) scrapeOnce(ctx context.Context) {
-	sources, err := s.store.ListSources(ctx, 200, 0)
+	sources, _, err := s.store.ListSources(ctx, 200, 0)
 	if err != nil {
 		log.Printf("Ingestion: failed to list sources: %v", err)
 		return
@@ -68,7 +69,7 @@ func (s *IngestionService) scrapeOnce(ctx context.Context) {
 		default:
 		}
 
-		scr := scraper.NewGenericScraper(src.URL)
+		scr := s.pickScraper(src.URL, src.Type)
 		rawJobs, err := scr.FetchJobs(since)
 		if err != nil {
 			log.Printf("Ingestion: scrape failed for %s: %v", src.URL, err)
@@ -182,5 +183,28 @@ func (s *IngestionService) ruleScore(text string) int {
 		return 60
 	default:
 		return 0
+	}
+}
+
+func (s *IngestionService) pickScraper(rawURL, sourceType string) scraper.JobScraper {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return scraper.NewGenericScraper(rawURL)
+	}
+	host := u.Host
+
+	switch {
+	case strings.Contains(host, "remoteok.com"):
+		return scraper.NewRemoteOKScraper("golang")
+	case strings.Contains(host, "weworkremotely.com"):
+		return scraper.NewWWRScraper()
+	case strings.Contains(host, "lever.co"):
+		return scraper.NewLeverScraper(rawURL)
+	case strings.Contains(host, "greenhouse.io") || strings.Contains(host, "boards.greenhouse.io"):
+		return scraper.NewGreenhouseScraper(rawURL)
+	default:
+		// Fall back to generic
+		_ = sourceType
+		return scraper.NewGenericScraper(rawURL)
 	}
 }

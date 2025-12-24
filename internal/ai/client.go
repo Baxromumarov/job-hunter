@@ -4,12 +4,47 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"os"
+	"strings"
 	"time"
 )
 
 type Client interface {
 	ClassifyWebsite(ctx context.Context, data WebsiteData) (WebsiteClassification, error)
 	MatchJob(ctx context.Context, job JobData, profile CandidateProfile) (JobMatch, error)
+}
+
+// NewClient creates an AI client based on the AI_PROVIDER environment variable.
+// Supported providers: "gemini" (default if GEMINI_API_KEY is set), "mock"
+//
+// Environment variables:
+//   - AI_PROVIDER: "gemini" or "mock" (optional, auto-detected)
+//   - GEMINI_API_KEY: Your Google Gemini API key (get free at https://aistudio.google.com/apikey)
+func NewClient() Client {
+	provider := strings.ToLower(os.Getenv("AI_PROVIDER"))
+	geminiKey := os.Getenv("GEMINI_API_KEY")
+
+	// Auto-detect provider if not specified
+	if provider == "" {
+		if geminiKey != "" {
+			provider = "gemini"
+		} else {
+			provider = "mock"
+		}
+	}
+
+	switch provider {
+	case "gemini":
+		if geminiKey == "" {
+			fmt.Println("WARNING: AI_PROVIDER=gemini but GEMINI_API_KEY not set, falling back to mock")
+			return NewMockClient()
+		}
+		fmt.Println("Using Gemini AI client (free tier: 1,500 requests/day)")
+		return NewGeminiClient(geminiKey)
+	default:
+		fmt.Println("Using Mock AI client (set GEMINI_API_KEY for real AI)")
+		return NewMockClient()
+	}
 }
 
 type WebsiteData struct {

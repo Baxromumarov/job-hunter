@@ -14,6 +14,8 @@ const state = {
     pageSize: 20,
     currentTab: 'jobs',
     pendingApply: null,
+    jobsTotal: 0,
+    sourcesTotal: 0,
 };
 
 const escapeMap = {
@@ -30,9 +32,13 @@ function escapeHTML(value) {
 }
 
 function formatDate(value) {
-    if (!value) return 'Recently added';
+    if (!value) return '';
     const date = new Date(value);
-    return Number.isNaN(date.getTime()) ? 'Recently added' : date.toLocaleDateString();
+    if (Number.isNaN(date.getTime())) return '';
+    const day = String(date.getDate()).padStart(2, '0');
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const year = date.getFullYear();
+    return `${day}-${month}-${year}`;
 }
 
 function sourceLabel(job) {
@@ -69,7 +75,7 @@ function renderJobCard(job) {
                 <div>
                     <p class="eyebrow">${escapeHTML(source)} ${job.source_type ? '• ' + escapeHTML(job.source_type) : ''}</p>
                     <h3>${escapeHTML(job.title || 'Untitled role')}</h3>
-                    <div class="job-meta">${escapeHTML(job.company || 'Unknown company')} • ${escapeHTML(job.location || 'Remote')} • ${posted}</div>
+                    <div class="job-meta">${escapeHTML(job.company || 'Unknown')} • ${escapeHTML(job.location || 'Remote')} ${posted ? '• ' + posted : ''}</div>
                 </div>
                 <span class="score-badge">${job.match_score || 0}% match</span>
             </div>
@@ -80,17 +86,18 @@ function renderJobCard(job) {
     `;
 }
 
-function renderPagination(type, page, length) {
+function renderPagination(type, page, totalCount) {
     const isJobs = type === 'jobs';
+    const totalPages = Math.max(1, Math.ceil((totalCount || 0) / state.pageSize));
     const prevDisabled = page <= 0 ? 'disabled' : '';
-    const nextDisabled = length < state.pageSize ? 'disabled' : '';
+    const nextDisabled = page >= totalPages-1 ? 'disabled' : '';
     const prevHandler = isJobs ? `changePage("jobs", ${page - 1})` : `changePage("sources", ${page - 1})`;
     const nextHandler = isJobs ? `changePage("jobs", ${page + 1})` : `changePage("sources", ${page + 1})`;
 
     return `
         <div class="pagination">
             <button class="ghost" ${prevDisabled} onclick='${prevHandler}'>Prev</button>
-            <span class="muted-text">Page ${page + 1}</span>
+            <span class="muted-text">Page ${page + 1} of ${totalPages}</span>
             <button class="ghost" ${nextDisabled} onclick='${nextHandler}'>Next</button>
         </div>
     `;
@@ -104,7 +111,7 @@ function renderJobs(jobs) {
     }
     jobList.innerHTML = `
         ${jobs.map(renderJobCard).join('')}
-        ${renderPagination('jobs', state.jobsPage, jobs.length)}
+        ${renderPagination('jobs', state.jobsPage, state.jobsTotal)}
     `;
 }
 
@@ -120,13 +127,17 @@ function renderSources(items) {
         <div class="source-row glow">
             <div class="info">
                 <strong>${escapeHTML(src.url)}</strong>
-                <span class="hint">${escapeHTML(src.type || src.source_type || 'unknown')} • ${src.confidence ? `${Math.round(src.confidence * 100)}% confidence` : 'pending'}${src.reason ? ' • ' + escapeHTML(src.reason) : ''}</span>
+                <div class="hint">
+                    <span class="chip">${escapeHTML(src.type || src.source_type || 'unknown')}</span>
+                    ${src.confidence ? `<span style="margin-left:6px;">${Math.round(src.confidence * 100)}% confidence</span>` : '<span style="margin-left:6px;">pending</span>'}
+                    ${src.reason ? `<span style="margin-left:6px;">${escapeHTML(src.reason)}</span>` : ''}
+                </div>
             </div>
             <span class="status ${src.status || 'accepted'}">${escapeHTML(src.status || 'accepted')}</span>
         </div>
     `).join('');
 
-    sourcesList.innerHTML = content + renderPagination('sources', state.sourcesPage, state.sources.length);
+    sourcesList.innerHTML = content + renderPagination('sources', state.sourcesPage, state.sourcesTotal);
 }
 
 async function fetchJobs(page = 0) {
@@ -137,6 +148,7 @@ async function fetchJobs(page = 0) {
         const response = await fetch(`${API_URL}/jobs?limit=${state.pageSize}&offset=${page * state.pageSize}`);
         const payload = await response.json();
         const items = payload.items || payload || [];
+        state.jobsTotal = payload.total || items.length;
         renderJobs(items);
     } catch (error) {
         jobList.innerHTML = `<div class="card" style="color: red">Error loading jobs: ${error.message}</div>`;
@@ -150,6 +162,7 @@ async function fetchSources(page = 0) {
         const response = await fetch(`${API_URL}/sources?limit=${state.pageSize}&offset=${page * state.pageSize}`);
         const payload = await response.json();
         const items = payload.items || payload || [];
+        state.sourcesTotal = payload.total || items.length;
         const normalized = items.map((src) => ({
             ...src,
             reason: src.reason || src.classification_reason || '',
@@ -211,12 +224,14 @@ async function addSource() {
         });
 
         resultBox.innerHTML = `
-            <div class="card" style="background: #f0fdf4; border-color: #bbf7d0;">
-                <strong>Result:</strong><br>
-                Status: ${isAccepted ? 'Accepted ✅' : 'Rejected ❌'}<br>
-                Tech Related: ${data.tech_related ? '✅' : '❌'}<br>
-                Confidence: ${(data.confidence * 100).toFixed(1)}%<br>
-                Reason: ${escapeHTML(data.reason || '')}
+            <div class="alert ${isAccepted ? 'success' : 'error'}">
+                <div style="margin-bottom: 6px; font-weight: 700;">Result</div>
+                <div class="pill ${isAccepted ? 'success' : 'error'}">
+                    <span>Status: ${isAccepted ? 'Accepted' : 'Rejected'}</span>
+                </div>
+                <div style="margin-top: 8px;">Tech Related: ${data.tech_related ? '✅' : '❌'}</div>
+                <div>Confidence: ${(data.confidence * 100).toFixed(1)}%</div>
+                <div style="margin-top: 4px; color: #cbd5e1;">Reason: ${escapeHTML(data.reason || '')}</div>
             </div>
         `;
         urlInput.value = '';
@@ -281,8 +296,12 @@ async function applyToJob(id, url, event) {
 function changePage(type, page) {
     if (page < 0) return;
     if (type === 'jobs') {
+        const totalPages = Math.max(1, Math.ceil((state.jobsTotal || 0) / state.pageSize));
+        if (page >= totalPages) return;
         fetchJobs(page);
     } else {
+        const totalPages = Math.max(1, Math.ceil((state.sourcesTotal || 0) / state.pageSize));
+        if (page >= totalPages) return;
         fetchSources(page);
     }
 }
