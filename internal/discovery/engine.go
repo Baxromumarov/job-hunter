@@ -205,11 +205,14 @@ func (e *Engine) processCandidate(ctx context.Context, c candidateSource) {
 	}
 }
 
-func guessSourceType(url string) string {
-	if strings.Contains(url, "remoteok") || strings.Contains(url, "weworkremotely") || strings.Contains(url, "builtin.com") || strings.Contains(url, "linkedin") {
-		return "job_board"
-	}
-	if strings.Contains(url, "greenhouse") || strings.Contains(url, "lever") {
+func guessSourceType(u string) string {
+	u = strings.ToLower(u)
+	if strings.Contains(u, "remoteok") ||
+		strings.Contains(u, "weworkremotely") ||
+		strings.Contains(u, "builtin.com") ||
+		strings.Contains(u, "linkedin") ||
+		strings.Contains(u, "greenhouse.io") ||
+		strings.Contains(u, "lever.co") {
 		return "job_board"
 	}
 	return "company_page"

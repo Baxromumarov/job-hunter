@@ -2,26 +2,24 @@ package discovery
 
 import (
 	"context"
-	"net/http"
 	"net/url"
 	"strings"
-	"time"
 
 	"github.com/PuerkitoBio/goquery"
+	"github.com/baxromumarov/job-hunter/internal/httpx"
 )
 
 // duckDuckSearch fetches a small set of URLs from DuckDuckGo html endpoint for a query.
 func duckDuckSearch(ctx context.Context, query string, limit int) []string {
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := httpx.NewPoliteClient("job-hunter-bot/1.0")
 	reqURL := "https://duckduckgo.com/html/?q=" + url.QueryEscape(query)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	req, err := httpx.NewRequest(ctx, reqURL)
 	if err != nil {
 		return nil
 	}
-	req.Header.Set("User-Agent", "job-hunter-bot/1.0")
 
-	resp, err := client.Do(req)
+	resp, err := client.Do(ctx, req)
 	if err != nil {
 		return nil
 	}

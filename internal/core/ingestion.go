@@ -11,6 +11,8 @@ import (
 	"github.com/baxromumarov/job-hunter/internal/ai"
 	"github.com/baxromumarov/job-hunter/internal/scraper"
 	"github.com/baxromumarov/job-hunter/internal/store"
+	"golang.org/x/sync/errgroup"
+	"golang.org/x/time/rate"
 )
 
 type IngestionService struct {
@@ -20,6 +22,8 @@ type IngestionService struct {
 	keywords   []string
 	blockedLoc []string
 	profile    ai.CandidateProfile
+	hostLimits map[string]*rate.Limiter
+	hostMu     sync.Mutex
 }
 
 func NewIngestionService(store *store.Store, matcher *MatcherService) *IngestionService {
@@ -32,6 +36,7 @@ func NewIngestionService(store *store.Store, matcher *MatcherService) *Ingestion
 		profile: ai.CandidateProfile{
 			TechStack: []string{"golang", "backend", "grpc", "rest", "postgresql", "redis", "docker", "linux"},
 		},
+		hostLimits: make(map[string]*rate.Limiter),
 	}
 }
 
@@ -68,27 +73,29 @@ func (s *IngestionService) scrapeOnce(ctx context.Context) {
 	workerCount := 6
 	srcCh := make(chan store.Source)
 
-	var wg sync.WaitGroup
+	g, gctx := errgroup.WithContext(ctx)
 	for i := 0; i < workerCount; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		g.Go(func() error {
 			for src := range srcCh {
 				select {
-				case <-ctx.Done():
-					return
+				case <-gctx.Done():
+					return gctx.Err()
 				default:
 				}
-				s.processSource(ctx, src, since)
+				s.processSource(gctx, src, since)
 			}
-		}()
+			return nil
+		})
 	}
 
 	for _, src := range sources {
+		if gctx.Err() != nil {
+			break
+		}
 		srcCh <- src
 	}
 	close(srcCh)
-	wg.Wait()
+	_ = g.Wait()
 }
 
 func (s *IngestionService) cleanupLoop(ctx context.Context, interval, retention time.Duration) {
@@ -194,6 +201,13 @@ func (s *IngestionService) pickScraper(rawURL, sourceType string) scraper.JobScr
 }
 
 func (s *IngestionService) processSource(ctx context.Context, src store.Source, since time.Time) {
+	limiter := s.hostLimiter(src.URL)
+	if limiter != nil {
+		if err := limiter.Wait(ctx); err != nil {
+			return
+		}
+	}
+
 	scr := s.pickScraper(src.URL, src.Type)
 	rawJobs, err := scr.FetchJobs(since)
 	if err != nil {
@@ -209,10 +223,7 @@ func (s *IngestionService) processSource(ctx context.Context, src store.Source, 
 		}
 
 		postDate := raw.PostedAt
-		if postDate.IsZero() {
-			postDate = time.Now()
-		}
-		if postDate.Before(since) {
+		if !postDate.IsZero() && postDate.Before(since) {
 			continue
 		}
 
@@ -241,7 +252,7 @@ func (s *IngestionService) processSource(ctx context.Context, src store.Source, 
 			Location:     raw.Location,
 			MatchScore:   finalScore,
 			MatchSummary: summary,
-			PostedAt:     &postDate,
+			PostedAt:     nullableTime(postDate),
 		}
 
 		if err := s.store.SaveJob(ctx, job); err != nil {
@@ -252,4 +263,30 @@ func (s *IngestionService) processSource(ctx context.Context, src store.Source, 
 	if err := s.store.MarkSourceScraped(ctx, src.ID); err != nil {
 		log.Printf("Ingestion: failed to mark source %d scraped: %v", src.ID, err)
 	}
+}
+
+func (s *IngestionService) hostLimiter(rawURL string) *rate.Limiter {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return nil
+	}
+	host := u.Hostname()
+	if host == "" {
+		return nil
+	}
+	s.hostMu.Lock()
+	defer s.hostMu.Unlock()
+	if lim, ok := s.hostLimits[host]; ok {
+		return lim
+	}
+	lim := rate.NewLimiter(rate.Every(time.Second), 2)
+	s.hostLimits[host] = lim
+	return lim
+}
+
+func nullableTime(t time.Time) *time.Time {
+	if t.IsZero() {
+		return nil
+	}
+	return &t
 }
