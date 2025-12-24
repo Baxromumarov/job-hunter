@@ -4,6 +4,8 @@ import (
 	"context"
 	"log/slog"
 	"net/url"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -25,23 +27,65 @@ type IngestionService struct {
 	normalizer scraper.Normalizer
 	keywords   []string
 	blockedLoc []string
+	blockedJob []string
 	profile    ai.CandidateProfile
 	fetcher    *httpx.CollyFetcher
+	minMatch   int
 	hostLimits map[string]*rate.Limiter
 	hostMu     sync.Mutex
 }
 
 func NewIngestionService(store *store.Store, matcher *MatcherService) *IngestionService {
+	minMatch := clampMatchScore(intFromEnv("JOB_MIN_MATCH_SCORE", 60))
 	return &IngestionService{
 		store:      store,
 		matcher:    matcher,
 		normalizer: scraper.NewSimpleNormalizer(),
-		keywords:   []string{"golang", "go developer", "backend", "microservices", "grpc", "distributed systems", "software engineer"},
+		keywords: []string{
+			"golang",
+			"go developer",
+			"go engineer",
+			"backend",
+			"backend engineer",
+			"backend developer",
+			"platform engineer",
+			"infrastructure engineer",
+			"distributed systems",
+			"microservices",
+			"grpc",
+			"api",
+			"software engineer",
+			"site reliability",
+			"sre",
+		},
 		blockedLoc: []string{"india", "delhi", "mumbai", "bangalore", "bengaluru", "korea", "south korea", "seoul", "japan", "tokyo", "china", "beijing", "shanghai"},
+		blockedJob: []string{
+			"sales",
+			"account executive",
+			"account manager",
+			"account director",
+			"business development",
+			"bdm",
+			"bdr",
+			"sdr",
+			"customer success",
+			"marketing",
+			"recruiter",
+			"talent acquisition",
+			"human resources",
+			"hr ",
+			"finance",
+			"accounting",
+			"legal",
+			"partnership",
+			"partnerships",
+			"salesforce",
+		},
 		profile: ai.CandidateProfile{
 			TechStack: []string{"golang", "backend", "grpc", "rest", "postgresql", "redis", "docker", "linux"},
 		},
 		fetcher:    httpx.NewCollyFetcher("job-hunter-bot/1.0"),
+		minMatch:   minMatch,
 		hostLimits: make(map[string]*rate.Limiter),
 	}
 }
@@ -134,6 +178,9 @@ func (s *IngestionService) cleanup(ctx context.Context, retention time.Duration)
 }
 
 func (s *IngestionService) scoreJob(ctx context.Context, title, description string) (int, string) {
+	if s.isBlockedJob(title, description) {
+		return 0, ""
+	}
 	ruleScore := s.ruleScore(title + " " + description)
 	if ruleScore == 0 {
 		return 0, ""
@@ -180,6 +227,22 @@ func (s *IngestionService) isBlockedLocation(loc string) bool {
 	l := strings.ToLower(loc)
 	for _, b := range s.blockedLoc {
 		if strings.Contains(l, b) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *IngestionService) isBlockedJob(title, description string) bool {
+	text := strings.ToLower(strings.TrimSpace(title + " " + description))
+	if text == "" {
+		return false
+	}
+	for _, kw := range s.blockedJob {
+		if kw == "" {
+			continue
+		}
+		if strings.Contains(text, kw) {
 			return true
 		}
 	}
@@ -261,7 +324,7 @@ func (s *IngestionService) processSource(ctx context.Context, src store.Source, 
 		}
 
 		finalScore, summary := s.scoreJob(ctx, raw.Title, desc)
-		if finalScore < 70 {
+		if finalScore < s.minMatch {
 			continue
 		}
 
@@ -420,4 +483,27 @@ func nullableTime(t time.Time) *time.Time {
 		return nil
 	}
 	return &t
+}
+
+func intFromEnv(name string, fallback int) int {
+	val := strings.TrimSpace(os.Getenv(name))
+	if val == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(val)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func clampMatchScore(score int) int {
+	switch {
+	case score < 0:
+		return 0
+	case score > 100:
+		return 100
+	default:
+		return score
+	}
 }

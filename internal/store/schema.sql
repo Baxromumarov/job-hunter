@@ -45,6 +45,24 @@ CREATE TABLE IF NOT EXISTS jobs (
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS stats_snapshots (
+    id SERIAL PRIMARY KEY,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    pages_crawled BIGINT,
+    jobs_discovered BIGINT,
+    jobs_extracted BIGINT,
+    ai_calls BIGINT,
+    errors_total BIGINT,
+    crawl_avg_seconds DOUBLE PRECISION,
+    urls_discovered BIGINT,
+    sources_promoted BIGINT,
+    ats_detected BIGINT,
+    sources_zero_jobs BIGINT,
+    sources_total BIGINT,
+    jobs_total BIGINT,
+    active_jobs BIGINT
+);
+
 ALTER TABLE sources ADD COLUMN IF NOT EXISTS last_scraped_at TIMESTAMP WITH TIME ZONE;
 ALTER TABLE sources ADD COLUMN IF NOT EXISTS discovered_at TIMESTAMP WITH TIME ZONE DEFAULT NOW();
 ALTER TABLE sources ADD COLUMN IF NOT EXISTS classification_reason TEXT;
@@ -75,3 +93,4 @@ CREATE INDEX IF NOT EXISTS idx_sources_normalized_url ON sources(normalized_url)
 CREATE INDEX IF NOT EXISTS idx_sources_host ON sources(host);
 CREATE INDEX IF NOT EXISTS idx_sources_page_type ON sources(page_type);
 CREATE INDEX IF NOT EXISTS idx_sources_alias ON sources(is_alias);
+CREATE INDEX IF NOT EXISTS idx_stats_snapshots_created_at ON stats_snapshots(created_at DESC);

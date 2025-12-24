@@ -3,6 +3,8 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
 
@@ -120,6 +122,125 @@ func (s *Server) handleAddSource(w http.ResponseWriter, r *http.Request) {
 			"tech_related": false,
 			"confidence":   0.0,
 			"reason":       "URL not eligible for discovery",
+			"existed":      existed,
+		})
+		return
+	}
+
+	if urlutil.IsKnownJobBoardHost(host) {
+		canonicalURL, isAlias, err := s.store.ResolveCanonicalSource(r.Context(), normalized, host, urlutil.PageTypeJobList)
+		if err != nil {
+			respondError(w, http.StatusInternalServerError, "Failed to resolve canonical source: "+err.Error())
+			return
+		}
+		if isAlias {
+			_, existed, err := s.store.AddSource(r.Context(), normalized, req.SourceType, urlutil.PageTypeJobList, true, canonicalURL, false, false, 0, "alias", false)
+			if err != nil {
+				respondError(w, http.StatusInternalServerError, "Failed to save source: "+err.Error())
+				return
+			}
+			respondJSON(w, http.StatusOK, map[string]interface{}{
+				"is_job_site":  false,
+				"tech_related": false,
+				"confidence":   0.0,
+				"reason":       "Alias of canonical source",
+				"existed":      existed,
+			})
+			return
+		}
+
+		_, existed, err := s.store.AddSource(
+			r.Context(),
+			normalized,
+			req.SourceType,
+			urlutil.PageTypeJobList,
+			false,
+			"",
+			true,
+			true,
+			0.9,
+			"job_board_allowlist",
+			false,
+		)
+		if err != nil {
+			respondError(w, http.StatusInternalServerError, "Failed to save source: "+err.Error())
+			return
+		}
+		respondJSON(w, http.StatusOK, map[string]interface{}{
+			"is_job_site":  true,
+			"tech_related": true,
+			"confidence":   0.9,
+			"reason":       "job_board_allowlist",
+			"existed":      existed,
+		})
+		return
+	}
+
+	if urlutil.IsATSHost(host) {
+		if atsURL, atsHost, err := urlutil.NormalizeATSLink(normalized); err == nil && atsHost != "" {
+			normalized = atsURL
+			host = atsHost
+		}
+		pageType := urlutil.DetectPageType(normalized)
+		if pageType == urlutil.PageTypeNonJob {
+			_, existed, err := s.store.AddSource(r.Context(), normalized, req.SourceType, urlutil.PageTypeNonJob, false, "", false, false, 0, "ats_root", false)
+			if err != nil {
+				respondError(w, http.StatusInternalServerError, "Failed to save source: "+err.Error())
+				return
+			}
+			respondJSON(w, http.StatusOK, map[string]interface{}{
+				"is_job_site":  false,
+				"tech_related": false,
+				"confidence":   0.0,
+				"reason":       "ATS root URL",
+				"existed":      existed,
+			})
+			return
+		}
+
+		canonicalURL, isAlias, err := s.store.ResolveCanonicalSource(r.Context(), normalized, host, urlutil.PageTypeJobList)
+		if err != nil {
+			respondError(w, http.StatusInternalServerError, "Failed to resolve canonical source: "+err.Error())
+			return
+		}
+		if isAlias {
+			_, existed, err := s.store.AddSource(r.Context(), normalized, req.SourceType, urlutil.PageTypeJobList, true, canonicalURL, false, false, 0, "alias", false)
+			if err != nil {
+				respondError(w, http.StatusInternalServerError, "Failed to save source: "+err.Error())
+				return
+			}
+			respondJSON(w, http.StatusOK, map[string]interface{}{
+				"is_job_site":  false,
+				"tech_related": false,
+				"confidence":   0.0,
+				"reason":       "Alias of canonical source",
+				"existed":      existed,
+			})
+			return
+		}
+
+		_, existed, err := s.store.AddSource(
+			r.Context(),
+			normalized,
+			req.SourceType,
+			urlutil.PageTypeJobList,
+			false,
+			"",
+			true,
+			true,
+			0.9,
+			"ats_host",
+			false,
+		)
+		if err != nil {
+			respondError(w, http.StatusInternalServerError, "Failed to save source: "+err.Error())
+			return
+		}
+		respondJSON(w, http.StatusOK, map[string]interface{}{
+			"is_job_site":  true,
+			"tech_related": true,
+			"confidence":   0.9,
+			"reason":       "ats_host",
 			"existed":      existed,
 		})
 		return
@@ -262,6 +383,9 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	}
 
 	snapshot := observability.Snapshot()
+	if err := s.store.SaveStatsSnapshot(r.Context(), snapshot, sourcesTotal, jobsTotal, activeJobs); err != nil {
+		slog.Error("stats snapshot save failed", "error", err)
+	}
 	respondJSON(w, http.StatusOK, map[string]interface{}{
 		"pages_crawled":     snapshot.PagesCrawled,
 		"jobs_discovered":   snapshot.JobsDiscovered,
@@ -276,6 +400,37 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		"sources_total":     sourcesTotal,
 		"jobs_total":        jobsTotal,
 		"active_jobs":       activeJobs,
+	})
+}
+
+func (s *Server) handleStatsHistory(w http.ResponseWriter, r *http.Request) {
+	metric := r.URL.Query().Get("metric")
+	if metric == "" {
+		respondError(w, http.StatusBadRequest, "Metric is required")
+		return
+	}
+
+	limit, offset := parsePagination(r, 20)
+	items, total, err := s.store.ListStatsHistory(r.Context(), metric, limit, offset)
+	if err != nil {
+		if errors.Is(err, store.ErrUnknownMetric) {
+			respondError(w, http.StatusBadRequest, "Unknown metric")
+			return
+		}
+		respondError(w, http.StatusInternalServerError, "Failed to load stats history: "+err.Error())
+		return
+	}
+
+	if items == nil {
+		items = []store.StatPoint{}
+	}
+
+	respondJSON(w, http.StatusOK, map[string]interface{}{
+		"metric": metric,
+		"items":  items,
+		"limit":  limit,
+		"offset": offset,
+		"total":  total,
 	})
 }
 

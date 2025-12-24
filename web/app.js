@@ -6,6 +6,7 @@ const sourcesList = document.getElementById('sourcesList');
 const jobModal = document.getElementById('jobModal');
 const applyModal = document.getElementById('applyModal');
 const statsGrid = document.getElementById('statsGrid');
+const statsModal = document.getElementById('statsModal');
 
 const state = {
     jobs: [],
@@ -20,6 +21,12 @@ const state = {
     statusFilter: 'active', // active, applied, rejected, closed, all
     activeTotal: 0,
     stats: null,
+    statsHistoryMetric: '',
+    statsHistoryLabel: '',
+    statsHistoryPage: 0,
+    statsHistoryTotal: 0,
+    statsHistoryPageSize: 12,
+    statsHistoryItems: [],
 };
 
 const escapeMap = {
@@ -43,6 +50,26 @@ function formatDate(value) {
     const month = String(date.getMonth() + 1).padStart(2, '0');
     const year = date.getFullYear();
     return `${day}-${month}-${year}`;
+}
+
+function formatDateTime(value) {
+    if (!value) return '';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return '';
+    const day = String(date.getDate()).padStart(2, '0');
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const year = date.getFullYear();
+    const hours = String(date.getHours()).padStart(2, '0');
+    const minutes = String(date.getMinutes()).padStart(2, '0');
+    return `${day}-${month}-${year} ${hours}:${minutes}`;
+}
+
+function formatStatValue(metric, value) {
+    if (metric === 'crawl_avg_seconds') {
+        return `${Number(value || 0).toFixed(2)}s`;
+    }
+    const num = Number(value || 0);
+    return Number.isFinite(num) ? Math.round(num).toLocaleString() : '0';
 }
 
 function sourceLabel(job) {
@@ -175,38 +202,53 @@ function renderStats(stats) {
         return;
     }
 
-    statsGrid.innerHTML = `
-        <div class="card glow stat-card">
-            <span class="stat-label">Pages Scanned</span>
-            <span class="stat-value">${stats.pages_crawled ?? 0}</span>
-            <span class="stat-sub">HTML pages parsed</span>
+    const cards = [
+        {
+            metric: 'pages_crawled',
+            label: 'Pages Scanned',
+            value: stats.pages_crawled ?? 0,
+            sub: 'HTML pages parsed',
+        },
+        {
+            metric: 'sources_total',
+            label: 'Sources Available',
+            value: stats.sources_total ?? 0,
+            sub: 'Approved sources',
+        },
+        {
+            metric: 'active_jobs',
+            label: 'Jobs Available',
+            value: stats.active_jobs ?? 0,
+            sub: 'Active jobs right now',
+        },
+        {
+            metric: 'jobs_total',
+            label: 'Jobs Total',
+            value: stats.jobs_total ?? 0,
+            sub: 'All stored jobs',
+        },
+        {
+            metric: 'ai_calls',
+            label: 'AI Calls',
+            value: stats.ai_calls ?? 0,
+            sub: 'Classifier + matcher',
+        },
+        {
+            metric: 'errors_total',
+            label: 'Errors',
+            value: stats.errors_total ?? 0,
+            sub: 'Network/parse/store',
+        },
+    ];
+
+    statsGrid.innerHTML = cards.map((card) => `
+        <div class="card glow stat-card stat-button" onclick="openStatsHistory('${card.metric}', '${card.label}')">
+            <span class="stat-label">${card.label}</span>
+            <span class="stat-value">${card.value}</span>
+            <span class="stat-sub">${card.sub}</span>
+            <span class="stat-action">View history</span>
         </div>
-        <div class="card glow stat-card">
-            <span class="stat-label">Sources Available</span>
-            <span class="stat-value">${stats.sources_total ?? 0}</span>
-            <span class="stat-sub">Approved sources</span>
-        </div>
-        <div class="card glow stat-card">
-            <span class="stat-label">Jobs Available</span>
-            <span class="stat-value">${stats.active_jobs ?? 0}</span>
-            <span class="stat-sub">Active jobs right now</span>
-        </div>
-        <div class="card glow stat-card">
-            <span class="stat-label">Jobs Total</span>
-            <span class="stat-value">${stats.jobs_total ?? 0}</span>
-            <span class="stat-sub">All stored jobs</span>
-        </div>
-        <div class="card glow stat-card">
-            <span class="stat-label">AI Calls</span>
-            <span class="stat-value">${stats.ai_calls ?? 0}</span>
-            <span class="stat-sub">Classifier + matcher</span>
-        </div>
-        <div class="card glow stat-card">
-            <span class="stat-label">Errors</span>
-            <span class="stat-value">${stats.errors_total ?? 0}</span>
-            <span class="stat-sub">Network/parse/store</span>
-        </div>
-    `;
+    `).join('');
 }
 
 async function fetchJobs(page = 0) {
@@ -256,6 +298,120 @@ async function fetchStats() {
     } catch (error) {
         statsGrid.innerHTML = `<div class="card" style="color: red">Error loading stats: ${error.message}</div>`;
     }
+}
+
+async function fetchStatsHistory(page = 0) {
+    if (!state.statsHistoryMetric || !statsModal) return;
+    state.statsHistoryPage = page;
+    statsModal.innerHTML = `
+        <div class="modal-content stats-modal-content" onclick="event.stopPropagation()">
+            <div class="modal-header">
+                <div>
+                    <div class="tag">Stats History</div>
+                    <h2 class="modal-title">${state.statsHistoryLabel}</h2>
+                    <div class="modal-meta">Loading snapshots...</div>
+                </div>
+                <button class="modal-close" onclick="closeStatsModal(event)">Close ✕</button>
+            </div>
+            <div class="loading">Loading history...</div>
+        </div>
+    `;
+    statsModal.classList.remove('hidden');
+
+    try {
+        const limit = state.statsHistoryPageSize;
+        const offset = page * limit;
+        const metric = encodeURIComponent(state.statsHistoryMetric);
+        const response = await fetch(`${API_URL}/stats/history?metric=${metric}&limit=${limit}&offset=${offset}`);
+        const payload = await response.json();
+        state.statsHistoryItems = payload.items || [];
+        state.statsHistoryTotal = payload.total || 0;
+        renderStatsHistory();
+    } catch (error) {
+        statsModal.innerHTML = `
+            <div class="modal-content stats-modal-content" onclick="event.stopPropagation()">
+                <div class="modal-header">
+                    <div>
+                        <div class="tag">Stats History</div>
+                        <h2 class="modal-title">${state.statsHistoryLabel}</h2>
+                        <div class="modal-meta">Error loading history</div>
+                    </div>
+                    <button class="modal-close" onclick="closeStatsModal(event)">Close ✕</button>
+                </div>
+                <div class="card" style="color: #fca5a5;">${error.message}</div>
+            </div>
+        `;
+    }
+}
+
+function renderStatsHistory() {
+    if (!statsModal) return;
+    const items = state.statsHistoryItems || [];
+    const total = state.statsHistoryTotal || 0;
+    const metric = state.statsHistoryMetric;
+    const label = state.statsHistoryLabel;
+    const showing = items.length;
+
+    const rows = items.map((item) => `
+        <div class="stats-row">
+            <div class="stats-time">${formatDateTime(item.created_at)}</div>
+            <div class="stats-value">${formatStatValue(metric, item.value)}</div>
+        </div>
+    `).join('');
+
+    statsModal.innerHTML = `
+        <div class="modal-content stats-modal-content" onclick="event.stopPropagation()">
+            <div class="modal-header">
+                <div>
+                    <div class="tag">Stats History</div>
+                    <h2 class="modal-title">${label}</h2>
+                    <div class="modal-meta">Showing ${showing} of ${total} snapshots</div>
+                </div>
+                <button class="modal-close" onclick="closeStatsModal(event)">Close ✕</button>
+            </div>
+            <div class="stats-history">
+                <div class="stats-row stats-row-header">
+                    <div class="stats-time">Timestamp</div>
+                    <div class="stats-value">Value</div>
+                </div>
+                ${rows || '<div class="card">No history yet. Open Stats again to capture snapshots.</div>'}
+            </div>
+            ${renderStatsPagination(state.statsHistoryPage, total)}
+        </div>
+    `;
+}
+
+function renderStatsPagination(page, totalCount) {
+    const totalPages = Math.max(1, Math.ceil((totalCount || 0) / state.statsHistoryPageSize));
+    const prevDisabled = page <= 0 ? 'disabled' : '';
+    const nextDisabled = page >= totalPages - 1 ? 'disabled' : '';
+    return `
+        <div class="pagination stats-pagination">
+            <button class="ghost" ${prevDisabled} onclick="changeStatsHistoryPage(${page - 1})">Prev</button>
+            <span class="muted-text">Page ${page + 1} of ${totalPages}</span>
+            <button class="ghost" ${nextDisabled} onclick="changeStatsHistoryPage(${page + 1})">Next</button>
+        </div>
+    `;
+}
+
+function openStatsHistory(metric, label) {
+    state.statsHistoryMetric = metric;
+    state.statsHistoryLabel = label;
+    fetchStatsHistory(0);
+}
+
+function changeStatsHistoryPage(page) {
+    if (page < 0) return;
+    const totalPages = Math.max(1, Math.ceil((state.statsHistoryTotal || 0) / state.statsHistoryPageSize));
+    if (page >= totalPages) return;
+    fetchStatsHistory(page);
+}
+
+function closeStatsModal(event) {
+    if (event) event.stopPropagation();
+    if (!statsModal) return;
+    statsModal.classList.add('hidden');
+    statsModal.innerHTML = '';
 }
 
 function upsertSourceEntry(entry) {

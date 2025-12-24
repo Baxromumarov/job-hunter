@@ -194,6 +194,7 @@ func (s *GenericScraper) collectDetailLinks(ctx context.Context, pageURL string,
 	if err != nil {
 		return nil
 	}
+	baseIsATS := urlutil.IsATSHost(pageBase.Hostname())
 	seen := make(map[string]struct{})
 	var links []string
 	if err := s.fetcher.Fetch(ctx, pageURL, func(c *colly.Collector) {
@@ -202,7 +203,7 @@ func (s *GenericScraper) collectDetailLinks(ctx context.Context, pageURL string,
 			if href == "" {
 				return
 			}
-			if !relaxed {
+			if !relaxed && !baseIsATS {
 				lower := strings.ToLower(href + " " + strings.TrimSpace(e.Text))
 				if !strings.Contains(lower, "job") &&
 					!strings.Contains(lower, "career") &&
@@ -220,7 +221,7 @@ func (s *GenericScraper) collectDetailLinks(ctx context.Context, pageURL string,
 			if err != nil || host == "" {
 				return
 			}
-			if urlutil.IsATSHost(host) {
+			if urlutil.IsATSHost(host) && !baseIsATS {
 				return
 			}
 			if !sameHost(pageBase, host) {

@@ -91,6 +91,34 @@ var atsHosts = []string{
 	"workable.com",
 }
 
+var jobBoardHosts = []string{
+	"angel.co",
+	"flexjobs.com",
+	"freelancer.com",
+	"jobspresso.co",
+	"justremote.co",
+	"linkedin.com",
+	"nodesk.co",
+	"outsourcely.com",
+	"pangian.com",
+	"remote.co",
+	"remote4me.com",
+	"remoteok.com",
+	"remoteok.io",
+	"remotecrew.io",
+	"remotees.com",
+	"remotehabits.com",
+	"remotive.com",
+	"simplyhired.com",
+	"skipthechive.com",
+	"toptal.com",
+	"upwork.com",
+	"virtualvocations.com",
+	"weworkremotely.com",
+	"workingnomads.com",
+	"europeremotely.com",
+}
+
 func Normalize(raw string) (string, string, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -265,6 +293,16 @@ func IsATSHost(host string) bool {
 	h := normalizeHost(host)
 	for _, ats := range atsHosts {
 		if strings.Contains(h, ats) {
+			return true
+		}
+	}
+	return false
+}
+
+func IsKnownJobBoardHost(host string) bool {
+	h := normalizeHost(host)
+	for _, board := range jobBoardHosts {
+		if strings.Contains(h, board) {
 			return true
 		}
 	}

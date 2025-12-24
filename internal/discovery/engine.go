@@ -172,6 +172,12 @@ func (e *Engine) processCandidate(ctx context.Context, c candidateSource) {
 		slog.Info("discovery skip", "url", c.URL, "reason", "invalid_url")
 		return
 	}
+	if urlutil.IsATSHost(host) {
+		if atsURL, atsHost, err := urlutil.NormalizeATSLink(normalized); err == nil && atsHost != "" {
+			normalized = atsURL
+			host = atsHost
+		}
+	}
 	if !urlutil.IsDiscoveryEligible(normalized) {
 		slog.Info("discovery skip", "url", normalized, "reason", "ineligible")
 		return
@@ -182,6 +188,7 @@ func (e *Engine) processCandidate(ctx context.Context, c candidateSource) {
 	if sourceType == "" {
 		sourceType = guessSourceType(normalized)
 	}
+	forcedJobBoard := urlutil.IsKnownJobBoardHost(host)
 
 	existing, err := e.store.FindSourceByURL(ctx, normalized)
 	if err != nil {
@@ -189,7 +196,7 @@ func (e *Engine) processCandidate(ctx context.Context, c candidateSource) {
 		slog.Error("discovery lookup failed", "url", normalized, "error", err)
 		return
 	}
-	if existing != nil && existing.PageType != urlutil.PageTypeCandidate {
+	if existing != nil && existing.PageType != urlutil.PageTypeCandidate && !forcedJobBoard {
 		reason := "already_processed"
 		if existing.IsAlias {
 			reason = "alias"
@@ -199,6 +206,97 @@ func (e *Engine) processCandidate(ctx context.Context, c candidateSource) {
 			reason = "non_job"
 		}
 		slog.Info("discovery skip", "url", normalized, "reason", reason, "page_type", existing.PageType)
+		return
+	}
+
+	if forcedJobBoard {
+		pageType := urlutil.PageTypeJobList
+		canonicalURL, isAlias, err := e.store.ResolveCanonicalSource(ctx, normalized, host, pageType)
+		if err != nil {
+			observability.IncError(observability.ErrorStore, "discovery")
+			slog.Error("discovery canonical resolve failed", "url", normalized, "error", err)
+			return
+		}
+		if isAlias {
+			_, _, _ = e.store.AddSource(ctx, normalized, sourceType, pageType, true, canonicalURL, false, false, 0, "alias", false)
+			slog.Info("discovery skip", "url", normalized, "reason", "alias", "canonical", canonicalURL)
+			return
+		}
+
+		observability.IncSourceDecision("accepted")
+		observability.IncSourcesPromoted("discovery")
+		id, existed, err := e.store.AddSource(
+			ctx,
+			normalized,
+			sourceType,
+			pageType,
+			false,
+			"",
+			true,
+			true,
+			0.9,
+			"job_board_allowlist",
+			false,
+		)
+		if err != nil {
+			observability.IncError(observability.ErrorStore, "discovery")
+			slog.Error("discovery store source failed", "url", normalized, "error", err)
+			return
+		}
+		if existed {
+			slog.Info("discovery skip", "url", normalized, "reason", "already_processed", "id", id)
+			return
+		}
+		slog.Info("discovery source approved", "url", normalized, "id", id)
+		return
+	}
+
+	if urlutil.IsATSHost(host) {
+		pageType := urlutil.DetectPageType(normalized)
+		if pageType == urlutil.PageTypeNonJob {
+			_, _, _ = e.store.AddSource(ctx, normalized, sourceType, urlutil.PageTypeNonJob, false, "", false, false, 0, "ats_root", false)
+			slog.Info("discovery skip", "url", normalized, "reason", "ats_root")
+			return
+		}
+
+		pageType = urlutil.PageTypeJobList
+		canonicalURL, isAlias, err := e.store.ResolveCanonicalSource(ctx, normalized, host, pageType)
+		if err != nil {
+			observability.IncError(observability.ErrorStore, "discovery")
+			slog.Error("discovery canonical resolve failed", "url", normalized, "error", err)
+			return
+		}
+		if isAlias {
+			_, _, _ = e.store.AddSource(ctx, normalized, sourceType, pageType, true, canonicalURL, false, false, 0, "alias", false)
+			slog.Info("discovery skip", "url", normalized, "reason", "alias", "canonical", canonicalURL)
+			return
+		}
+
+		observability.IncSourceDecision("accepted")
+		observability.IncSourcesPromoted("discovery")
+		id, existed, err := e.store.AddSource(
+			ctx,
+			normalized,
+			sourceType,
+			pageType,
+			false,
+			"",
+			true,
+			true,
+			0.9,
+			"ats_host",
+			false,
+		)
+		if err != nil {
+			observability.IncError(observability.ErrorStore, "discovery")
+			slog.Error("discovery store source failed", "url", normalized, "error", err)
+			return
+		}
+		if existed {
+			slog.Info("discovery skip", "url", normalized, "reason", "already_processed", "id", id)
+			return
+		}
+		slog.Info("discovery source approved", "url", normalized, "id", id)
 		return
 	}
 
@@ -347,6 +445,28 @@ func guessSourceType(u string) string {
 		strings.Contains(u, "weworkremotely") ||
 		strings.Contains(u, "builtin.com") ||
 		strings.Contains(u, "linkedin") ||
+		strings.Contains(u, "angel.co") ||
+		strings.Contains(u, "flexjobs.com") ||
+		strings.Contains(u, "freelancer.com") ||
+		strings.Contains(u, "jobspresso.co") ||
+		strings.Contains(u, "justremote.co") ||
+		strings.Contains(u, "nodesk.co") ||
+		strings.Contains(u, "outsourcely.com") ||
+		strings.Contains(u, "pangian.com") ||
+		strings.Contains(u, "remote.co") ||
+		strings.Contains(u, "remote4me.com") ||
+		strings.Contains(u, "remoteok.io") ||
+		strings.Contains(u, "remotecrew.io") ||
+		strings.Contains(u, "remotees.com") ||
+		strings.Contains(u, "remotehabits.com") ||
+		strings.Contains(u, "remotive.com") ||
+		strings.Contains(u, "simplyhired.com") ||
+		strings.Contains(u, "skipthechive.com") ||
+		strings.Contains(u, "toptal.com") ||
+		strings.Contains(u, "upwork.com") ||
+		strings.Contains(u, "virtualvocations.com") ||
+		strings.Contains(u, "workingnomads.com") ||
+		strings.Contains(u, "europeremotely.com") ||
 		strings.Contains(u, "greenhouse.io") ||
 		strings.Contains(u, "lever.co") ||
 		strings.Contains(u, "ashbyhq.com") ||

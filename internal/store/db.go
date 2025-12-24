@@ -3,12 +3,14 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"time"
 
 	_ "github.com/lib/pq"
 
+	"github.com/baxromumarov/job-hunter/internal/observability"
 	"github.com/baxromumarov/job-hunter/internal/urlutil"
 )
 
@@ -119,6 +121,13 @@ type Job struct {
 	PostedAt     *time.Time `json:"posted_at,omitempty"`
 	CreatedAt    time.Time  `json:"created_at"`
 }
+
+type StatPoint struct {
+	CreatedAt time.Time `json:"created_at"`
+	Value     float64   `json:"value"`
+}
+
+var ErrUnknownMetric = errors.New("unknown metric")
 
 func (s *Store) GetJobs(ctx context.Context, limit, offset int) ([]Job, int, int, error) {
 	limit, offset = normalizePagination(limit, offset)
@@ -873,6 +882,101 @@ func (s *Store) GetStatsCounts(ctx context.Context) (sourcesTotal, jobsTotal, ac
 	}
 
 	return sourcesTotal, jobsTotal, activeJobs, nil
+}
+
+var statColumns = map[string]string{
+	"pages_crawled":     "pages_crawled",
+	"jobs_discovered":   "jobs_discovered",
+	"jobs_extracted":    "jobs_extracted",
+	"ai_calls":          "ai_calls",
+	"errors_total":      "errors_total",
+	"crawl_avg_seconds": "crawl_avg_seconds",
+	"urls_discovered":   "urls_discovered",
+	"sources_promoted":  "sources_promoted",
+	"ats_detected":      "ats_detected",
+	"sources_zero_jobs": "sources_zero_jobs",
+	"sources_total":     "sources_total",
+	"jobs_total":        "jobs_total",
+	"active_jobs":       "active_jobs",
+}
+
+func (s *Store) SaveStatsSnapshot(ctx context.Context, snapshot observability.StatsSnapshot, sourcesTotal, jobsTotal, activeJobs int) error {
+	_, err := s.db.ExecContext(
+		ctx,
+		`INSERT INTO stats_snapshots (
+			pages_crawled,
+			jobs_discovered,
+			jobs_extracted,
+			ai_calls,
+			errors_total,
+			crawl_avg_seconds,
+			urls_discovered,
+			sources_promoted,
+			ats_detected,
+			sources_zero_jobs,
+			sources_total,
+			jobs_total,
+			active_jobs
+		) VALUES (
+			$1, $2, $3, $4, $5, $6,
+			$7, $8, $9, $10, $11, $12, $13
+		)`,
+		int64(snapshot.PagesCrawled),
+		int64(snapshot.JobsDiscovered),
+		int64(snapshot.JobsExtracted),
+		int64(snapshot.AICalls),
+		int64(snapshot.ErrorsTotal),
+		snapshot.CrawlSecondsAvg,
+		int64(snapshot.URLsDiscovered),
+		int64(snapshot.SourcesPromoted),
+		int64(snapshot.ATSDetected),
+		int64(snapshot.SourcesZeroJobs),
+		int64(sourcesTotal),
+		int64(jobsTotal),
+		int64(activeJobs),
+	)
+	return err
+}
+
+func (s *Store) ListStatsHistory(ctx context.Context, metric string, limit, offset int) ([]StatPoint, int, error) {
+	column, ok := statColumns[metric]
+	if !ok {
+		return nil, 0, ErrUnknownMetric
+	}
+	limit, offset = normalizePagination(limit, offset)
+
+	var total int
+	if err := s.db.QueryRowContext(
+		ctx,
+		`SELECT COUNT(*) FROM stats_snapshots`,
+	).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	query := fmt.Sprintf(
+		`SELECT created_at, COALESCE(%s::double precision, 0)
+		FROM stats_snapshots
+		ORDER BY created_at DESC
+		LIMIT $1 OFFSET $2`, column,
+	)
+	rows, err := s.db.QueryContext(ctx, query, limit, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	var points []StatPoint
+	for rows.Next() {
+		var point StatPoint
+		if err := rows.Scan(&point.CreatedAt, &point.Value); err != nil {
+			return nil, 0, err
+		}
+		points = append(points, point)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+	return points, total, nil
 }
 
 func truncateString(s string, max int) string {
