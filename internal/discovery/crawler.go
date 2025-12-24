@@ -1,43 +1,27 @@
 package discovery
 
 import (
+	"bytes"
 	"context"
 	"encoding/xml"
-	"fmt"
 	"net/http"
 	"net/url"
 	"path"
 	"strings"
 
-	"github.com/PuerkitoBio/goquery"
 	"github.com/baxromumarov/job-hunter/internal/httpx"
+	"github.com/gocolly/colly/v2"
 )
 
 // crawler fetches known tech/startup pages and looks for career links.
 type crawler struct {
-	client *httpx.PoliteClient
+	fetcher *httpx.CollyFetcher
 }
 
 func newCrawler() *crawler {
 	return &crawler{
-		client: httpx.NewPoliteClient("job-hunter-bot/1.0"),
+		fetcher: httpx.NewCollyFetcher("job-hunter-bot/1.0"),
 	}
-}
-
-func (c *crawler) fetchDoc(ctx context.Context, link string) (*goquery.Document, error) {
-	req, err := httpx.NewRequest(ctx, link)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := c.client.Do(ctx, req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("status %d", resp.StatusCode)
-	}
-	return goquery.NewDocumentFromReader(resp.Body)
 }
 
 // extractCareerLinks crawls a page and augments results with path probes, sitemaps, and ATS detections.
@@ -61,90 +45,70 @@ func (c *crawler) extractCareerLinks(ctx context.Context, rawURL string) []strin
 		out = append(out, u)
 	}
 
-	doc, err := c.fetchDoc(ctx, rawURL)
-	if err == nil {
-		for _, link := range extractLinks(doc, base) {
-			add(link)
-		}
-		for _, ats := range detectATS(doc, base) {
-			add(ats)
-		}
+	for _, link := range c.collectLinksFromPage(ctx, rawURL) {
+		add(link)
 	}
 
 	for _, probe := range probePaths(base) {
 		if _, ok := seen[probe]; ok {
 			continue
 		}
-		probeDoc, err := c.fetchDoc(ctx, probe)
-		if err != nil {
-			continue
-		}
 		add(probe)
-		for _, link := range extractLinks(probeDoc, base) {
+		for _, link := range c.collectLinksFromPage(ctx, probe) {
 			add(link)
-		}
-		for _, ats := range detectATS(probeDoc, base) {
-			add(ats)
 		}
 	}
 
-	for _, link := range parseSitemaps(ctx, c.client, base) {
+	for _, link := range parseSitemaps(ctx, c.fetcher, base) {
 		add(link)
 	}
 
 	return out
 }
 
-func extractLinks(doc *goquery.Document, base *url.URL) []string {
+func (c *crawler) collectLinksFromPage(ctx context.Context, target string) []string {
+	pageBase, err := url.Parse(target)
+	if err != nil {
+		return nil
+	}
+
 	seen := make(map[string]struct{})
 	var links []string
-	doc.Find("a").Each(func(_ int, s *goquery.Selection) {
-		href, ok := s.Attr("href")
-		if !ok || href == "" {
-			return
-		}
-		lower := strings.ToLower(href + " " + s.Text())
-		if !strings.Contains(lower, "career") &&
-			!strings.Contains(lower, "job") &&
-			!strings.Contains(lower, "opening") &&
-			!strings.Contains(lower, "position") {
-			return
-		}
-
-		resolved := resolveLink(base, href)
-		if resolved == "" {
-			return
-		}
-		if _, ok := seen[resolved]; ok {
-			return
-		}
-		seen[resolved] = struct{}{}
-		links = append(links, resolved)
-	})
-	return links
-}
-
-func detectATS(doc *goquery.Document, base *url.URL) []string {
-	var ats []string
-	hosts := []string{"boards.greenhouse.io", "jobs.lever.co", "jobs.ashbyhq.com", ".workable.com"}
-
-	doc.Find("a").Each(func(_ int, s *goquery.Selection) {
-		href, ok := s.Attr("href")
-		if !ok || href == "" {
-			return
-		}
-		resolved := resolveLink(base, href)
-		if resolved == "" {
-			return
-		}
-		for _, h := range hosts {
-			if strings.Contains(resolved, h) {
-				ats = append(ats, resolved)
-				break
+	_ = c.fetcher.Fetch(ctx, target, func(col *colly.Collector) {
+		col.OnHTML("a[href]", func(e *colly.HTMLElement) {
+			href := e.Attr("href")
+			if href == "" {
+				return
 			}
-		}
+			resolved := resolveLink(pageBase, href)
+			if resolved == "" {
+				return
+			}
+			if isATSLink(resolved) {
+				if _, ok := seen[resolved]; ok {
+					return
+				}
+				seen[resolved] = struct{}{}
+				links = append(links, resolved)
+				return
+			}
+
+			lower := strings.ToLower(href + " " + e.Text)
+			if !strings.Contains(lower, "career") &&
+				!strings.Contains(lower, "job") &&
+				!strings.Contains(lower, "opening") &&
+				!strings.Contains(lower, "position") {
+				return
+			}
+			if _, ok := seen[resolved]; ok {
+				return
+			}
+			seen[resolved] = struct{}{}
+			links = append(links, resolved)
+		})
 	})
-	return ats
+
+	return links
 }
 
 func probePaths(base *url.URL) []string {
@@ -173,7 +137,7 @@ type urlset struct {
 	} `xml:"url"`
 }
 
-func parseSitemaps(ctx context.Context, client *httpx.PoliteClient, base *url.URL) []string {
+func parseSitemaps(ctx context.Context, fetcher *httpx.CollyFetcher, base *url.URL) []string {
 	if base == nil {
 		return nil
 	}
@@ -185,37 +149,20 @@ func parseSitemaps(ctx context.Context, client *httpx.PoliteClient, base *url.UR
 	seen := make(map[string]struct{})
 
 	for _, sm := range candidates {
-		req, err := httpx.NewRequest(ctx, sm)
-		if err != nil {
-			continue
-		}
-		resp, err := client.Do(ctx, req)
-		if err != nil {
-			continue
-		}
-		if resp.StatusCode != http.StatusOK {
-			resp.Body.Close()
+		body, status, err := fetcher.FetchBytes(ctx, sm)
+		if err != nil || status != http.StatusOK || len(body) == 0 {
 			continue
 		}
 
 		var idx sitemapIndex
-		if err := xml.NewDecoder(resp.Body).Decode(&idx); err == nil && len(idx.Locations) > 0 {
-			resp.Body.Close()
+		if err := xml.NewDecoder(bytes.NewReader(body)).Decode(&idx); err == nil && len(idx.Locations) > 0 {
 			for _, loc := range idx.Locations {
-				reqChild, err := httpx.NewRequest(ctx, loc.Loc)
-				if err != nil {
-					continue
-				}
-				child, err := client.Do(ctx, reqChild)
-				if err != nil {
-					continue
-				}
-				if child.StatusCode != http.StatusOK {
-					child.Body.Close()
+				childBody, childStatus, err := fetcher.FetchBytes(ctx, loc.Loc)
+				if err != nil || childStatus != http.StatusOK || len(childBody) == 0 {
 					continue
 				}
 				var u urlset
-				if err := xml.NewDecoder(child.Body).Decode(&u); err == nil {
+				if err := xml.NewDecoder(bytes.NewReader(childBody)).Decode(&u); err == nil {
 					for _, link := range u.URLs {
 						if acceptSitemapURL(link.Loc) {
 							if _, ok := seen[link.Loc]; !ok {
@@ -225,11 +172,21 @@ func parseSitemaps(ctx context.Context, client *httpx.PoliteClient, base *url.UR
 						}
 					}
 				}
-				child.Body.Close()
 			}
 			continue
 		}
-		resp.Body.Close()
+
+		var u urlset
+		if err := xml.NewDecoder(bytes.NewReader(body)).Decode(&u); err == nil {
+			for _, link := range u.URLs {
+				if acceptSitemapURL(link.Loc) {
+					if _, ok := seen[link.Loc]; !ok {
+						seen[link.Loc] = struct{}{}
+						out = append(out, link.Loc)
+					}
+				}
+			}
+		}
 	}
 	return out
 }
@@ -240,6 +197,16 @@ func acceptSitemapURL(u string) bool {
 		strings.Contains(l, "job") ||
 		strings.Contains(l, "opening") ||
 		strings.Contains(l, "position")
+}
+
+func isATSLink(link string) bool {
+	hosts := []string{"boards.greenhouse.io", "jobs.lever.co", "jobs.ashbyhq.com", ".workable.com"}
+	for _, h := range hosts {
+		if strings.Contains(link, h) {
+			return true
+		}
+	}
+	return false
 }
 
 func resolveLink(base *url.URL, href string) string {

@@ -3,25 +3,24 @@ package scraper
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/url"
 	"strings"
 	"time"
 
-	"github.com/PuerkitoBio/goquery"
 	"github.com/baxromumarov/job-hunter/internal/httpx"
+	"github.com/gocolly/colly/v2"
 	"golang.org/x/net/html"
 )
 
 type GenericScraper struct {
 	BaseURL string
-	client  *httpx.PoliteClient
+	fetcher *httpx.CollyFetcher
 }
 
 func NewGenericScraper(baseURL string) *GenericScraper {
 	return &GenericScraper{
 		BaseURL: baseURL,
-		client:  httpx.NewPoliteClient("job-hunter-bot/1.0"),
+		fetcher: httpx.NewCollyFetcher("job-hunter-bot/1.0"),
 	}
 }
 
@@ -31,19 +30,12 @@ func (s *GenericScraper) FetchJobs(since time.Time) ([]RawJob, error) {
 
 	base, _ := url.Parse(s.BaseURL)
 
-	rootDoc, err := s.fetchDoc(ctx, s.BaseURL)
-	if err != nil {
-		return nil, err
-	}
-
-	candidates := s.collectDetailLinks(rootDoc, base)
+	candidates := s.collectDetailLinks(ctx, s.BaseURL)
 	for _, probe := range probePaths(base) {
 		if len(candidates) >= 50 {
 			break
 		}
-		if doc, err := s.fetchDoc(ctx, probe); err == nil {
-			candidates = append(candidates, s.collectDetailLinks(doc, base)...)
-		}
+		candidates = append(candidates, s.collectDetailLinks(ctx, probe)...)
 	}
 
 	seen := make(map[string]struct{})
@@ -57,12 +49,7 @@ func (s *GenericScraper) FetchJobs(since time.Time) ([]RawJob, error) {
 		}
 		seen[link] = struct{}{}
 
-		doc, err := s.fetchDoc(ctx, link)
-		if err != nil {
-			continue
-		}
-
-		if job := s.extractJob(doc, link, base); job != nil {
+		if job := s.extractJob(ctx, link, base); job != nil {
 			if !job.PostedAt.IsZero() && job.PostedAt.Before(since) {
 				continue
 			}
@@ -141,76 +128,106 @@ func probePaths(base *url.URL) []string {
 	return out
 }
 
-func (s *GenericScraper) fetchDoc(ctx context.Context, link string) (*goquery.Document, error) {
-	req, err := httpx.NewRequest(ctx, link)
+func (s *GenericScraper) collectDetailLinks(ctx context.Context, pageURL string) []string {
+	pageBase, err := url.Parse(pageURL)
 	if err != nil {
-		return nil, err
+		return nil
 	}
-	resp, err := s.client.Do(ctx, req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("status %d", resp.StatusCode)
-	}
-	return goquery.NewDocumentFromReader(resp.Body)
-}
-
-func (s *GenericScraper) collectDetailLinks(doc *goquery.Document, base *url.URL) []string {
 	seen := make(map[string]struct{})
 	var links []string
-	doc.Find("a").Each(func(_ int, a *goquery.Selection) {
-		href, ok := a.Attr("href")
-		if !ok || href == "" {
-			return
-		}
-		lower := strings.ToLower(href + " " + strings.TrimSpace(a.Text()))
-		if !strings.Contains(lower, "job") &&
-			!strings.Contains(lower, "career") &&
-			!strings.Contains(lower, "opening") &&
-			!strings.Contains(lower, "position") {
-			return
-		}
+	_ = s.fetcher.Fetch(ctx, pageURL, func(c *colly.Collector) {
+		c.OnHTML("a[href]", func(e *colly.HTMLElement) {
+			href := e.Attr("href")
+			if href == "" {
+				return
+			}
+			lower := strings.ToLower(href + " " + strings.TrimSpace(e.Text))
+			if !strings.Contains(lower, "job") &&
+				!strings.Contains(lower, "career") &&
+				!strings.Contains(lower, "opening") &&
+				!strings.Contains(lower, "position") {
+				return
+			}
 
-		resolved := resolveLink(base, href)
-		if resolved == "" {
-			return
-		}
-		if _, ok := seen[resolved]; ok {
-			return
-		}
-		seen[resolved] = struct{}{}
-		links = append(links, resolved)
+			resolved := resolveLink(pageBase, href)
+			if resolved == "" {
+				return
+			}
+			if _, ok := seen[resolved]; ok {
+				return
+			}
+			seen[resolved] = struct{}{}
+			links = append(links, resolved)
+		})
 	})
 	return links
 }
 
-func (s *GenericScraper) extractJob(doc *goquery.Document, link string, base *url.URL) *RawJob {
-	if job := parseJSONLD(doc); job != nil {
-		if job.URL == "" {
-			job.URL = link
+func (s *GenericScraper) extractJob(ctx context.Context, link string, base *url.URL) *RawJob {
+	var (
+		jsonJob *RawJob
+		title   string
+		desc    string
+	)
+
+	_ = s.fetcher.Fetch(ctx, link, func(c *colly.Collector) {
+		c.OnHTML("script[type='application/ld+json']", func(e *colly.HTMLElement) {
+			if jsonJob != nil {
+				return
+			}
+			if job := parseJSONLDString(e.Text); job != nil {
+				jsonJob = job
+			}
+		})
+		c.OnHTML("h1", func(e *colly.HTMLElement) {
+			if title == "" {
+				title = strings.TrimSpace(e.Text)
+			}
+		})
+		c.OnHTML("title", func(e *colly.HTMLElement) {
+			if title == "" {
+				title = strings.TrimSpace(e.Text)
+			}
+		})
+		c.OnHTML("meta[name='description']", func(e *colly.HTMLElement) {
+			if desc == "" {
+				desc = strings.TrimSpace(e.Attr("content"))
+			}
+		})
+		c.OnHTML("p", func(e *colly.HTMLElement) {
+			if desc == "" {
+				desc = strings.TrimSpace(e.Text)
+			}
+		})
+	})
+
+	if jsonJob != nil {
+		if jsonJob.URL == "" {
+			jsonJob.URL = link
 		}
-		if job.Company == "" {
-			job.Company = hostCompany(base)
+		if jsonJob.Title == "" {
+			jsonJob.Title = title
 		}
-		return job
+		if jsonJob.Description == "" {
+			jsonJob.Description = desc
+		}
+		if jsonJob.Company == "" {
+			jsonJob.Company = hostCompany(base)
+		}
+		if jsonJob.Title == "" {
+			jsonJob.Title = pathTitleFromURL(link)
+		}
+		if jsonJob.Title == "" {
+			return nil
+		}
+		return jsonJob
 	}
 
-	title := strings.TrimSpace(doc.Find("h1").First().Text())
-	if title == "" {
-		title = strings.TrimSpace(doc.Find("title").First().Text())
-	}
 	if title == "" {
 		title = pathTitleFromURL(link)
 	}
 	if title == "" {
 		return nil
-	}
-
-	desc := strings.TrimSpace(doc.Find("meta[name='description']").AttrOr("content", ""))
-	if desc == "" {
-		desc = strings.TrimSpace(doc.Find("p").First().Text())
 	}
 
 	return &RawJob{
@@ -222,67 +239,58 @@ func (s *GenericScraper) extractJob(doc *goquery.Document, link string, base *ur
 	}
 }
 
-func parseJSONLD(doc *goquery.Document) *RawJob {
-	var job RawJob
-	found := false
-	doc.Find("script[type='application/ld+json']").EachWithBreak(func(_ int, s *goquery.Selection) bool {
-		raw := strings.TrimSpace(s.Text())
-		if raw == "" {
-			return true
-		}
-		var payload map[string]interface{}
-		if err := json.Unmarshal([]byte(raw), &payload); err != nil {
-			return true
-		}
-		types := payload["@type"]
-		switch t := types.(type) {
-		case string:
-			if t != "JobPosting" {
-				return true
-			}
-		case []interface{}:
-			ok := false
-			for _, item := range t {
-				if str, ok2 := item.(string); ok2 && str == "JobPosting" {
-					ok = true
-				}
-			}
-			if !ok {
-				return true
-			}
-		default:
-			return true
-		}
-
-		job.Title = stringField(payload["title"])
-		job.Description = stringField(payload["description"])
-		job.Company = stringField(payload["hiringOrganization"])
-		if job.Company == "" {
-			if org, ok := payload["hiringOrganization"].(map[string]interface{}); ok {
-				job.Company = stringField(org["name"])
-			}
-		}
-		job.Location = stringField(payload["jobLocation"])
-		if loc, ok := payload["jobLocation"].(map[string]interface{}); ok {
-			job.Location = stringField(loc["addressLocality"])
-			if region := stringField(loc["addressRegion"]); region != "" {
-				job.Location = strings.TrimSpace(job.Location + " " + region)
-			}
-		}
-
-		if posted := stringField(payload["datePosted"]); posted != "" {
-			if t, err := time.Parse(time.RFC3339, posted); err == nil {
-				job.PostedAt = t
-			}
-		}
-		found = true
-		return false
-	})
-
-	if !found || job.Title == "" {
+func parseJSONLDString(raw string) *RawJob {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
 		return nil
 	}
-	return &job
+	var payload interface{}
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return nil
+	}
+	return findJobPosting(payload)
+}
+
+func findJobPosting(payload interface{}) *RawJob {
+	switch t := payload.(type) {
+	case map[string]interface{}:
+		if job := jobFromMap(t); job != nil {
+			return job
+		}
+		if graph, ok := t["@graph"].([]interface{}); ok {
+			for _, item := range graph {
+				if job := findJobPosting(item); job != nil {
+					return job
+				}
+			}
+		}
+	case []interface{}:
+		for _, item := range t {
+			if job := findJobPosting(item); job != nil {
+				return job
+			}
+		}
+	}
+	return nil
+}
+
+func jobFromMap(payload map[string]interface{}) *RawJob {
+	if !isJobPostingType(payload["@type"]) {
+		return nil
+	}
+
+	job := &RawJob{
+		Title:       stringField(payload["title"]),
+		Description: stringField(payload["description"]),
+		Company:     orgName(payload["hiringOrganization"]),
+		Location:    parseLocation(payload["jobLocation"]),
+		PostedAt:    parseDate(payload["datePosted"]),
+	}
+
+	if job.Title == "" && job.Description == "" {
+		return nil
+	}
+	return job
 }
 
 func stringField(v interface{}) string {
@@ -297,4 +305,78 @@ func stringField(v interface{}) string {
 		}
 	}
 	return ""
+}
+
+func isJobPostingType(t interface{}) bool {
+	switch v := t.(type) {
+	case string:
+		return v == "JobPosting"
+	case []interface{}:
+		for _, item := range v {
+			if s, ok := item.(string); ok && s == "JobPosting" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func orgName(v interface{}) string {
+	if name := stringField(v); name != "" {
+		return name
+	}
+	if org, ok := v.(map[string]interface{}); ok {
+		return stringField(org["name"])
+	}
+	return ""
+}
+
+func parseLocation(v interface{}) string {
+	switch t := v.(type) {
+	case string:
+		return strings.TrimSpace(t)
+	case []interface{}:
+		for _, item := range t {
+			if loc := parseLocation(item); loc != "" {
+				return loc
+			}
+		}
+	case map[string]interface{}:
+		if addr, ok := t["address"].(map[string]interface{}); ok {
+			return joinParts(
+				stringField(addr["addressLocality"]),
+				stringField(addr["addressRegion"]),
+				stringField(addr["addressCountry"]),
+			)
+		}
+		if name := stringField(t["name"]); name != "" {
+			return name
+		}
+	}
+	return ""
+}
+
+func parseDate(v interface{}) time.Time {
+	val := stringField(v)
+	if val == "" {
+		return time.Time{}
+	}
+	layouts := []string{time.RFC3339, time.RFC3339Nano, "2006-01-02"}
+	for _, layout := range layouts {
+		if t, err := time.Parse(layout, val); err == nil {
+			return t
+		}
+	}
+	return time.Time{}
+}
+
+func joinParts(parts ...string) string {
+	var out []string
+	for _, p := range parts {
+		if strings.TrimSpace(p) == "" {
+			continue
+		}
+		out = append(out, strings.TrimSpace(p))
+	}
+	return strings.Join(out, ", ")
 }
