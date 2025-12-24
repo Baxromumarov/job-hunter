@@ -9,7 +9,9 @@ import (
 
 	_ "embed"
 
+	"github.com/baxromumarov/job-hunter/internal/content"
 	"github.com/baxromumarov/job-hunter/internal/core"
+	"github.com/baxromumarov/job-hunter/internal/httpx"
 	"github.com/baxromumarov/job-hunter/internal/observability"
 	"github.com/baxromumarov/job-hunter/internal/store"
 	"github.com/baxromumarov/job-hunter/internal/urlutil"
@@ -18,6 +20,7 @@ import (
 type Engine struct {
 	store      *store.Store
 	classifier *core.ClassifierService
+	fetcher    *httpx.CollyFetcher
 }
 
 type candidateSource struct {
@@ -46,6 +49,7 @@ func NewEngine(store *store.Store, classifier *core.ClassifierService) *Engine {
 	return &Engine{
 		store:      store,
 		classifier: classifier,
+		fetcher:    httpx.NewCollyFetcher("job-hunter-bot/1.0"),
 	}
 }
 
@@ -168,118 +172,172 @@ func (e *Engine) processCandidate(ctx context.Context, c candidateSource) {
 		slog.Info("discovery skip", "url", c.URL, "reason", "invalid_url")
 		return
 	}
+	if !urlutil.IsDiscoveryEligible(normalized) {
+		slog.Info("discovery skip", "url", normalized, "reason", "ineligible")
+		return
+	}
+	observability.IncURLsDiscovered("discovery")
 
-	pageType := urlutil.DetectPageType(normalized)
 	sourceType := c.SourceType
 	if sourceType == "" {
 		sourceType = guessSourceType(normalized)
 	}
-	if pageType == urlutil.PageTypeNonJob {
-		_, _, _ = e.store.AddSource(ctx, normalized, sourceType, pageType, false, "", false, false, 0, "blocked_path")
-		slog.Info("discovery skip", "url", normalized, "reason", "blocked_path", "page_type", pageType)
-		return
-	}
-	if pageType == urlutil.PageTypeJobDetail {
-		_, _, _ = e.store.AddSource(ctx, normalized, sourceType, pageType, false, "", false, false, 0, "job_detail")
-		slog.Info("discovery skip", "url", normalized, "reason", "non_job", "page_type", pageType)
-		return
-	}
 
-	existing, err := e.store.FindSourceByURL(ctx, c.URL)
+	existing, err := e.store.FindSourceByURL(ctx, normalized)
 	if err != nil {
 		observability.IncError(observability.ErrorStore, "discovery")
 		slog.Error("discovery lookup failed", "url", normalized, "error", err)
 		return
 	}
-	if existing != nil {
+	if existing != nil && existing.PageType != urlutil.PageTypeCandidate {
 		reason := "already_processed"
 		if existing.IsAlias {
 			reason = "alias"
-		} else if existing.PageType == urlutil.PageTypeNonJob || existing.PageType == urlutil.PageTypeJobDetail {
+		} else if existing.PageType == urlutil.PageTypeNonJob ||
+			existing.PageType == urlutil.PageTypeJobDetail ||
+			existing.PageType == urlutil.PageTypeNonJobPermanent {
 			reason = "non_job"
 		}
 		slog.Info("discovery skip", "url", normalized, "reason", reason, "page_type", existing.PageType)
 		return
 	}
 
-	canonicalURL, isAlias, err := e.store.ResolveCanonicalSource(ctx, normalized, host, pageType)
+	_, _, _ = e.store.AddSource(
+		ctx,
+		normalized,
+		sourceType,
+		urlutil.PageTypeCandidate,
+		false,
+		"",
+		false,
+		false,
+		0,
+		"candidate",
+		false,
+	)
+
+	signals, err := content.Analyze(ctx, e.fetcher, normalized)
+	if err != nil {
+		errType := observability.ClassifyFetchError(err)
+		observability.IncError(errType, "discovery")
+		_ = e.store.MarkSourceErrorByURL(ctx, normalized, errType, err.Error())
+		slog.Error("discovery fetch failed", "url", normalized, "error", err)
+		return
+	}
+	observability.IncPagesCrawled("discovery")
+
+	if len(signals.ATSLinks) > 0 {
+		observability.IncATSDetected("discovery")
+		e.addATSSources(ctx, signals.ATSLinks)
+		observability.IncSourceDecision("rejected")
+		_, _, _ = e.store.AddSource(
+			ctx,
+			normalized,
+			sourceType,
+			urlutil.PageTypeNonJob,
+			false,
+			"",
+			false,
+			false,
+			0.9,
+			"ats_link",
+			true,
+		)
+		slog.Info("discovery skip", "url", normalized, "reason", "ats_link", "ats_count", len(signals.ATSLinks))
+		return
+	}
+
+	decision := content.Classify(signals)
+	if decision.PageType == urlutil.PageTypeNonJob {
+		observability.IncSourceDecision("rejected")
+		_, _, _ = e.store.AddSource(
+			ctx,
+			normalized,
+			sourceType,
+			urlutil.PageTypeNonJob,
+			false,
+			"",
+			false,
+			false,
+			decision.Confidence,
+			decision.Reason,
+			false,
+		)
+		slog.Info("discovery skip", "url", normalized, "reason", "non_job", "classification", decision.Reason)
+		return
+	}
+
+	canonicalURL, isAlias, err := e.store.ResolveCanonicalSource(ctx, normalized, host, decision.PageType)
 	if err != nil {
 		observability.IncError(observability.ErrorStore, "discovery")
 		slog.Error("discovery canonical resolve failed", "url", normalized, "error", err)
 		return
 	}
 	if isAlias {
-		_, _, _ = e.store.AddSource(ctx, normalized, sourceType, pageType, true, canonicalURL, false, false, 0, "alias")
+		_, _, _ = e.store.AddSource(ctx, normalized, sourceType, decision.PageType, true, canonicalURL, false, false, 0, "alias", false)
 		slog.Info("discovery skip", "url", normalized, "reason", "alias", "canonical", canonicalURL)
 		return
 	}
-	canonicalURL = ""
 
-	// In a real scenario, we would fetch the page content here.
-	// We pass dummy content to the classifier, which mocks the AI anyway.
-	// If we had a real scraper, we'd use it here.
-
-	title := c.Title
-	if title == "" {
-		title = "Title for " + c.URL
-	}
-	meta := c.Meta
-	if meta == "" {
-		meta = "Meta for " + c.URL
-	}
-	text := c.Text
-	if text == "" {
-		text = "Sample text for " + c.URL + " which is definitely long enough to pass the fifty character limit set in the mock ai client."
-	}
-
-	classification, err := e.classifier.Classify(ctx, normalized, title, meta, text)
+	observability.IncSourceDecision("accepted")
+	observability.IncSourcesPromoted("discovery")
+	id, existed, err := e.store.AddSource(
+		ctx,
+		normalized,
+		sourceType,
+		decision.PageType,
+		false,
+		"",
+		true,
+		true,
+		decision.Confidence,
+		decision.Reason,
+		false,
+	)
 	if err != nil {
-		observability.IncError(observability.ErrorAI, "discovery")
-		_ = e.store.MarkSourceErrorByURL(ctx, normalized, observability.ErrorAI, err.Error())
-		slog.Error("discovery classify failed", "url", normalized, "error", err)
+		observability.IncError(observability.ErrorStore, "discovery")
+		slog.Error("discovery store source failed", "url", normalized, "error", err)
 		return
 	}
+	if existed {
+		slog.Info("discovery skip", "url", normalized, "reason", "already_processed", "id", id)
+		return
+	}
+	slog.Info("discovery source approved", "url", normalized, "id", id)
+	// Scraping now handled by ingestion using site-specific scrapers.
+}
 
-	if classification.IsJobSite && classification.TechRelated && classification.Confidence > 0.7 {
-		observability.IncSourceDecision("accepted")
-		id, existed, err := e.store.AddSource(
-			ctx,
-			normalized,
-			sourceType,
-			pageType,
-			false,
-			canonicalURL,
-			classification.IsJobSite,
-			classification.TechRelated,
-			classification.Confidence,
-			classification.Reason,
-		)
+func (e *Engine) addATSSources(ctx context.Context, links []string) {
+	seen := make(map[string]struct{})
+	for _, link := range links {
+		normalized, host, err := urlutil.NormalizeATSLink(link)
+		if err != nil || host == "" {
+			continue
+		}
+		if _, ok := seen[normalized]; ok {
+			continue
+		}
+		seen[normalized] = struct{}{}
+
+		pageType := urlutil.PageTypeJobList
+		sourceType := "job_board"
+		canonicalURL, isAlias, err := e.store.ResolveCanonicalSource(ctx, normalized, host, pageType)
 		if err != nil {
 			observability.IncError(observability.ErrorStore, "discovery")
-			slog.Error("discovery store source failed", "url", normalized, "error", err)
-		} else {
-			if existed {
-				slog.Info("discovery skip", "url", normalized, "reason", "already_processed", "id", id)
-			} else {
-				slog.Info("discovery source approved", "url", normalized, "id", id)
-				// Scraping now handled by ingestion using site-specific scrapers
-			}
+			slog.Error("discovery canonical resolve failed", "url", normalized, "error", err)
+			continue
 		}
-	} else {
-		observability.IncSourceDecision("rejected")
-		_, _, _ = e.store.AddSource(
-			ctx,
-			normalized,
-			c.SourceType,
-			urlutil.PageTypeNonJob,
-			false,
-			"",
-			false,
-			false,
-			classification.Confidence,
-			classification.Reason,
-		)
-		slog.Info("discovery skip", "url", normalized, "reason", "non_job", "confidence", classification.Confidence)
+		if isAlias {
+			_, _, _ = e.store.AddSource(ctx, normalized, sourceType, pageType, true, canonicalURL, false, false, 0, "alias", false)
+			continue
+		}
+
+		observability.IncSourceDecision("accepted")
+		observability.IncSourcesPromoted("discovery")
+		if _, _, err := e.store.AddSource(ctx, normalized, sourceType, pageType, false, "", true, true, 0.9, "ats_link", false); err != nil {
+			observability.IncError(observability.ErrorStore, "discovery")
+			slog.Error("discovery store ATS source failed", "url", normalized, "error", err)
+		}
 	}
 }
 
@@ -292,6 +350,10 @@ func guessSourceType(u string) string {
 		strings.Contains(u, "greenhouse.io") ||
 		strings.Contains(u, "lever.co") ||
 		strings.Contains(u, "ashbyhq.com") ||
+		strings.Contains(u, "workdayjobs.com") ||
+		strings.Contains(u, "myworkdayjobs.com") ||
+		strings.Contains(u, "smartrecruiters.com") ||
+		strings.Contains(u, "bamboohr.com") ||
 		strings.Contains(u, "workable.com") {
 		return "job_board"
 	}

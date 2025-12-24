@@ -32,18 +32,57 @@ func (s *GenericScraper) FetchJobs(since time.Time) ([]RawJob, error) {
 
 	base, _ := url.Parse(s.BaseURL)
 
-	candidates := s.collectDetailLinks(ctx, s.BaseURL)
+	candidates := s.collectDetailLinks(ctx, s.BaseURL, false)
 	for _, probe := range probePaths(base) {
 		if len(candidates) >= 50 {
 			break
 		}
-		candidates = append(candidates, s.collectDetailLinks(ctx, probe)...)
+		candidates = append(candidates, s.collectDetailLinks(ctx, probe, false)...)
 	}
 
 	seen := make(map[string]struct{})
 	var jobs []RawJob
 	for _, link := range candidates {
 		if len(jobs) >= 40 {
+			break
+		}
+		if _, ok := seen[link]; ok {
+			continue
+		}
+		seen[link] = struct{}{}
+
+		if job := s.extractJob(ctx, link, base); job != nil {
+			if !job.PostedAt.IsZero() && job.PostedAt.Before(since) {
+				continue
+			}
+			jobs = append(jobs, *job)
+		}
+	}
+
+	return jobs, nil
+}
+
+func (s *GenericScraper) FetchJobsRelaxed(since time.Time) ([]RawJob, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer cancel()
+
+	base, _ := url.Parse(s.BaseURL)
+
+	candidates := s.collectDetailLinks(ctx, s.BaseURL, true)
+	for _, probe := range probePaths(base) {
+		if len(candidates) >= 80 {
+			break
+		}
+		candidates = append(candidates, s.collectDetailLinks(ctx, probe, true)...)
+	}
+	if len(candidates) == 0 {
+		candidates = append(candidates, s.BaseURL)
+	}
+
+	seen := make(map[string]struct{})
+	var jobs []RawJob
+	for _, link := range candidates {
+		if len(jobs) >= 60 {
 			break
 		}
 		if _, ok := seen[link]; ok {
@@ -113,11 +152,31 @@ func hostCompany(base *url.URL) string {
 	return host
 }
 
+func sameHost(base *url.URL, host string) bool {
+	if base == nil || host == "" {
+		return false
+	}
+	baseHost := strings.ToLower(strings.TrimPrefix(base.Hostname(), "www."))
+	targetHost := strings.ToLower(strings.TrimPrefix(host, "www."))
+	return baseHost == targetHost
+}
+
 func probePaths(base *url.URL) []string {
 	if base == nil {
 		return nil
 	}
-	candidates := []string{"/careers", "/jobs", "/careers/jobs", "/join-us", "/work-with-us"}
+	candidates := []string{
+		"/careers",
+		"/jobs",
+		"/careers/jobs",
+		"/join-us",
+		"/work-with-us",
+		"/opportunities",
+		"/teams",
+		"/engineering",
+		"/early-careers",
+		"/company/careers",
+	}
 	var out []string
 	for _, p := range candidates {
 		next := *base
@@ -130,7 +189,7 @@ func probePaths(base *url.URL) []string {
 	return out
 }
 
-func (s *GenericScraper) collectDetailLinks(ctx context.Context, pageURL string) []string {
+func (s *GenericScraper) collectDetailLinks(ctx context.Context, pageURL string, relaxed bool) []string {
 	pageBase, err := url.Parse(pageURL)
 	if err != nil {
 		return nil
@@ -143,27 +202,38 @@ func (s *GenericScraper) collectDetailLinks(ctx context.Context, pageURL string)
 			if href == "" {
 				return
 			}
-			lower := strings.ToLower(href + " " + strings.TrimSpace(e.Text))
-			if !strings.Contains(lower, "job") &&
-				!strings.Contains(lower, "career") &&
-				!strings.Contains(lower, "opening") &&
-				!strings.Contains(lower, "position") {
-				return
+			if !relaxed {
+				lower := strings.ToLower(href + " " + strings.TrimSpace(e.Text))
+				if !strings.Contains(lower, "job") &&
+					!strings.Contains(lower, "career") &&
+					!strings.Contains(lower, "opening") &&
+					!strings.Contains(lower, "position") {
+					return
+				}
 			}
 
 			resolved := resolveLink(pageBase, href)
 			if resolved == "" {
 				return
 			}
-			pageType := urlutil.DetectPageType(resolved)
-			if pageType == urlutil.PageTypeNonJob {
+			normalized, host, err := urlutil.Normalize(resolved)
+			if err != nil || host == "" {
 				return
 			}
-			if _, ok := seen[resolved]; ok {
+			if urlutil.IsATSHost(host) {
 				return
 			}
-			seen[resolved] = struct{}{}
-			links = append(links, resolved)
+			if !sameHost(pageBase, host) {
+				return
+			}
+			if !urlutil.IsCrawlable(normalized) {
+				return
+			}
+			if _, ok := seen[normalized]; ok {
+				return
+			}
+			seen[normalized] = struct{}{}
+			links = append(links, normalized)
 		})
 	}); err != nil {
 		observability.IncError(observability.ClassifyFetchError(err), "scraper_generic")
@@ -294,6 +364,7 @@ func jobFromMap(payload map[string]interface{}) *RawJob {
 	}
 
 	job := &RawJob{
+		URL:         stringField(payload["url"]),
 		Title:       stringField(payload["title"]),
 		Description: stringField(payload["description"]),
 		Company:     orgName(payload["hiringOrganization"]),

@@ -8,19 +8,29 @@ import (
 type StatsSnapshot struct {
 	PagesCrawled      uint64            `json:"pages_crawled"`
 	JobsDiscovered    uint64            `json:"jobs_discovered"`
+	JobsExtracted     uint64            `json:"jobs_extracted"`
 	AICalls           uint64            `json:"ai_calls"`
 	ErrorsTotal       uint64            `json:"errors_total"`
 	CrawlSecondsAvg   float64           `json:"crawl_seconds_avg"`
+	URLsDiscovered    uint64            `json:"urls_discovered"`
+	SourcesPromoted   uint64            `json:"sources_promoted"`
+	ATSDetected       uint64            `json:"ats_detected"`
+	SourcesZeroJobs   uint64            `json:"sources_zero_jobs"`
 	SourceDecisions   map[string]uint64 `json:"source_decisions,omitempty"`
 	ErrorsByType      map[string]uint64 `json:"errors_by_type,omitempty"`
 	ErrorsByComponent map[string]uint64 `json:"errors_by_component,omitempty"`
 }
 
 var (
-	pagesCrawled   uint64
-	jobsDiscovered uint64
-	aiCalls        uint64
-	errorsTotal    uint64
+	pagesCrawled    uint64
+	jobsDiscovered  uint64
+	jobsExtracted   uint64
+	aiCalls         uint64
+	errorsTotal     uint64
+	urlsDiscovered  uint64
+	sourcesPromoted uint64
+	atsDetected     uint64
+	sourcesZeroJobs uint64
 
 	crawlCount uint64
 	crawlNanos uint64
@@ -41,6 +51,26 @@ func IncPagesCrawled(_ string) {
 
 func IncJobsDiscovered(_ string) {
 	atomic.AddUint64(&jobsDiscovered, 1)
+}
+
+func IncJobsExtracted(_ string) {
+	atomic.AddUint64(&jobsExtracted, 1)
+}
+
+func IncURLsDiscovered(_ string) {
+	atomic.AddUint64(&urlsDiscovered, 1)
+}
+
+func IncSourcesPromoted(_ string) {
+	atomic.AddUint64(&sourcesPromoted, 1)
+}
+
+func IncATSDetected(_ string) {
+	atomic.AddUint64(&atsDetected, 1)
+}
+
+func IncSourcesZeroJobs(_ string) {
+	atomic.AddUint64(&sourcesZeroJobs, 1)
 }
 
 func IncAICall(_ string) {
@@ -94,9 +124,14 @@ func Snapshot() StatsSnapshot {
 	return StatsSnapshot{
 		PagesCrawled:      atomic.LoadUint64(&pagesCrawled),
 		JobsDiscovered:    atomic.LoadUint64(&jobsDiscovered),
+		JobsExtracted:     atomic.LoadUint64(&jobsExtracted),
 		AICalls:           atomic.LoadUint64(&aiCalls),
 		ErrorsTotal:       atomic.LoadUint64(&errorsTotal),
 		CrawlSecondsAvg:   avg,
+		URLsDiscovered:    atomic.LoadUint64(&urlsDiscovered),
+		SourcesPromoted:   atomic.LoadUint64(&sourcesPromoted),
+		ATSDetected:       atomic.LoadUint64(&atsDetected),
+		SourcesZeroJobs:   atomic.LoadUint64(&sourcesZeroJobs),
 		SourceDecisions:   sourceCopy,
 		ErrorsByType:      errorsTypeCopy,
 		ErrorsByComponent: errorsComponentCopy,

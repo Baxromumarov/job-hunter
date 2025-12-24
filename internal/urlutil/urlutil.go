@@ -8,11 +8,15 @@ import (
 )
 
 const (
-	PageTypeCareerRoot = "career_root"
-	PageTypeJobList    = "job_list"
-	PageTypeJobDetail  = "job_detail"
-	PageTypeNonJob     = "non_job"
+	PageTypeCandidate       = "candidate"
+	PageTypeCareerRoot      = "career_root"
+	PageTypeJobList         = "job_list"
+	PageTypeJobDetail       = "job_detail"
+	PageTypeNonJob          = "non_job"
+	PageTypeNonJobPermanent = "non_job_permanent"
 )
+
+const maxDiscoveryDepth = 6
 
 var careerRoots = []string{
 	"careers",
@@ -55,6 +59,24 @@ var blockedSegments = map[string]struct{}{
 	"engineering":   {},
 }
 
+var staticExtensions = map[string]struct{}{
+	".css":   {},
+	".gif":   {},
+	".ico":   {},
+	".jpeg":  {},
+	".jpg":   {},
+	".js":    {},
+	".mp3":   {},
+	".mp4":   {},
+	".pdf":   {},
+	".png":   {},
+	".svg":   {},
+	".ttf":   {},
+	".woff":  {},
+	".woff2": {},
+	".zip":   {},
+}
+
 var atsHosts = []string{
 	"boards.greenhouse.io",
 	"greenhouse.io",
@@ -62,6 +84,10 @@ var atsHosts = []string{
 	"lever.co",
 	"jobs.ashbyhq.com",
 	"ashbyhq.com",
+	"workdayjobs.com",
+	"myworkdayjobs.com",
+	"smartrecruiters.com",
+	"bamboohr.com",
 	"workable.com",
 }
 
@@ -78,6 +104,43 @@ func Normalize(raw string) (string, string, error) {
 	u.Path = normalizePath(u.Path)
 	u.Path = stripLocalePrefix(u.Path)
 	u.RawQuery = normalizeQuery(u.RawQuery)
+	return u.String(), u.Hostname(), nil
+}
+
+func NormalizeATSLink(raw string) (string, string, error) {
+	normalized, host, err := Normalize(raw)
+	if err != nil {
+		return "", "", err
+	}
+	if host == "" || !IsATSHost(host) {
+		return normalized, host, nil
+	}
+	u, err := url.Parse(normalized)
+	if err != nil {
+		return normalized, host, nil
+	}
+
+	segs := splitPath(u.Path)
+	switch {
+	case strings.Contains(host, "lever.co"):
+		if len(segs) > 0 {
+			u.Path = "/" + segs[0]
+		}
+	case strings.Contains(host, "greenhouse.io"):
+		if len(segs) > 0 && segs[0] == "embed" {
+			break
+		}
+		if len(segs) > 0 {
+			u.Path = "/" + segs[0]
+		}
+	case strings.Contains(host, "ashbyhq.com"):
+		if len(segs) > 0 {
+			u.Path = "/" + segs[0]
+		}
+	}
+
+	u.RawQuery = ""
+	u.Fragment = ""
 	return u.String(), u.Hostname(), nil
 }
 
@@ -208,6 +271,21 @@ func IsATSHost(host string) bool {
 	return false
 }
 
+func IsCrawlable(raw string) bool {
+	normalized, host, err := Normalize(raw)
+	if err != nil || host == "" {
+		return false
+	}
+	u, err := url.Parse(normalized)
+	if err != nil {
+		return false
+	}
+	if isStaticAssetPath(u.Path) {
+		return false
+	}
+	return true
+}
+
 func CareerRootPriority(raw string) int {
 	normalized, host, err := Normalize(raw)
 	if err != nil || host == "" {
@@ -239,8 +317,24 @@ func CareerRootPriority(raw string) int {
 }
 
 func IsDiscoveryEligible(raw string) bool {
-	pt := DetectPageType(raw)
-	return pt == PageTypeCareerRoot || pt == PageTypeJobList
+	normalized, host, err := Normalize(raw)
+	if err != nil || host == "" {
+		return false
+	}
+	if IsATSHost(host) {
+		return true
+	}
+	u, err := url.Parse(normalized)
+	if err != nil {
+		return false
+	}
+	if isStaticAssetPath(u.Path) {
+		return false
+	}
+	if pathDepth(u.Path) > maxDiscoveryDepth {
+		return false
+	}
+	return true
 }
 
 func splitPath(p string) []string {
@@ -253,6 +347,19 @@ func splitPath(p string) []string {
 		parts[i] = strings.ToLower(parts[i])
 	}
 	return parts
+}
+
+func pathDepth(p string) int {
+	return len(splitPath(p))
+}
+
+func isStaticAssetPath(p string) bool {
+	ext := strings.ToLower(path.Ext(p))
+	if ext == "" {
+		return false
+	}
+	_, ok := staticExtensions[ext]
+	return ok
 }
 
 func isLocale(seg string) bool {

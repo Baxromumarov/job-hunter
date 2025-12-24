@@ -36,7 +36,9 @@ func (c *crawler) extractCareerLinks(ctx context.Context, rawURL string) []strin
 	}
 
 	seen := make(map[string]struct{})
+	seenATS := make(map[string]struct{})
 	var out []string
+	var atsOut []string
 
 	add := func(u string) {
 		if u == "" || !strings.HasPrefix(u, "http") {
@@ -49,7 +51,25 @@ func (c *crawler) extractCareerLinks(ctx context.Context, rawURL string) []strin
 		out = append(out, u)
 	}
 
-	for _, link := range c.collectLinksFromPage(ctx, rawURL) {
+	addATS := func(u string) {
+		if u == "" || !strings.HasPrefix(u, "http") {
+			return
+		}
+		if _, ok := seenATS[u]; ok {
+			return
+		}
+		seenATS[u] = struct{}{}
+		atsOut = append(atsOut, u)
+	}
+
+	links, atsLinks := c.collectLinksFromPage(ctx, rawURL)
+	if len(atsLinks) > 0 {
+		for _, link := range atsLinks {
+			addATS(link)
+		}
+		return atsOut
+	}
+	for _, link := range links {
 		add(link)
 	}
 
@@ -58,22 +78,36 @@ func (c *crawler) extractCareerLinks(ctx context.Context, rawURL string) []strin
 			continue
 		}
 		add(probe)
-		for _, link := range c.collectLinksFromPage(ctx, probe) {
+		links, atsLinks = c.collectLinksFromPage(ctx, probe)
+		if len(atsLinks) > 0 {
+			for _, link := range atsLinks {
+				addATS(link)
+			}
+			return atsOut
+		}
+		for _, link := range links {
 			add(link)
 		}
 	}
 
 	for _, link := range parseSitemaps(ctx, c.fetcher, base) {
+		if urlutil.IsATSHost(hostFromURL(link)) {
+			addATS(link)
+			continue
+		}
 		add(link)
+	}
+	if len(atsOut) > 0 {
+		return atsOut
 	}
 
 	return out
 }
 
-func (c *crawler) collectLinksFromPage(ctx context.Context, target string) []string {
+func (c *crawler) collectLinksFromPage(ctx context.Context, target string) ([]string, []string) {
 	pageBase, err := url.Parse(target)
 	if err != nil {
-		return nil
+		return nil, nil
 	}
 
 	seen := make(map[string]struct{})
@@ -89,40 +123,56 @@ func (c *crawler) collectLinksFromPage(ctx context.Context, target string) []str
 			if resolved == "" {
 				return
 			}
-			if _, ok := seen[resolved]; ok {
+			normalized, host, err := urlutil.Normalize(resolved)
+			if err != nil {
 				return
 			}
-			seen[resolved] = struct{}{}
+			if _, ok := seen[normalized]; ok {
+				return
+			}
+			seen[normalized] = struct{}{}
 
-			if urlutil.IsATSHost(hostFromURL(resolved)) {
-				atsLinks = append(atsLinks, resolved)
+			if urlutil.IsATSHost(host) {
+				atsLinks = append(atsLinks, normalized)
 				return
 			}
 
-			if !urlutil.IsDiscoveryEligible(resolved) {
+			if !sameHost(pageBase, host) {
 				return
 			}
 
-			links = append(links, resolved)
+			if !urlutil.IsDiscoveryEligible(normalized) {
+				return
+			}
+
+			links = append(links, normalized)
 		})
 	}); err != nil {
 		observability.IncError(observability.ClassifyFetchError(err), "discovery")
 		slog.Debug("discovery page fetch failed", "url", target, "error", err)
-		return links
+		return links, atsLinks
 	}
 	observability.IncPagesCrawled("discovery")
 
-	if len(atsLinks) > 0 {
-		return atsLinks
-	}
-	return links
+	return links, atsLinks
 }
 
 func probePaths(base *url.URL) []string {
 	if base == nil {
 		return nil
 	}
-	paths := []string{"/careers", "/jobs", "/careers/jobs", "/join-us", "/work-with-us"}
+	paths := []string{
+		"/careers",
+		"/jobs",
+		"/careers/jobs",
+		"/join-us",
+		"/work-with-us",
+		"/opportunities",
+		"/teams",
+		"/engineering",
+		"/early-careers",
+		"/company/careers",
+	}
 	var out []string
 	for _, p := range paths {
 		res := *base
@@ -211,7 +261,12 @@ func acceptSitemapURL(u string) bool {
 	return strings.Contains(l, "career") ||
 		strings.Contains(l, "job") ||
 		strings.Contains(l, "opening") ||
-		strings.Contains(l, "position")
+		strings.Contains(l, "position") ||
+		strings.Contains(l, "opportun") ||
+		strings.Contains(l, "team") ||
+		strings.Contains(l, "join-us") ||
+		strings.Contains(l, "work-with-us") ||
+		strings.Contains(l, "early-careers")
 }
 
 func resolveLink(base *url.URL, href string) string {
@@ -237,4 +292,13 @@ func hostFromURL(raw string) string {
 		return ""
 	}
 	return u.Hostname()
+}
+
+func sameHost(base *url.URL, host string) bool {
+	if base == nil || host == "" {
+		return false
+	}
+	baseHost := strings.ToLower(strings.TrimPrefix(base.Hostname(), "www."))
+	targetHost := strings.ToLower(strings.TrimPrefix(host, "www."))
+	return baseHost == targetHost
 }

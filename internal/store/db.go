@@ -91,6 +91,8 @@ type Source struct {
 	LastScrapedAt  *time.Time `json:"last_scraped_at,omitempty"`
 	DiscoveredAt   *time.Time `json:"discovered_at,omitempty"`
 	Classification string     `json:"classification_reason,omitempty"`
+	ATSBacked      bool       `json:"ats_backed,omitempty"`
+	RecheckCount   int        `json:"recheck_count,omitempty"`
 	LastErrorType  string     `json:"last_error_type,omitempty"`
 	LastErrorMsg   string     `json:"last_error_message,omitempty"`
 	LastErrorAt    *time.Time `json:"last_error_at,omitempty"`
@@ -277,6 +279,8 @@ func (s *Store) ListSources(ctx context.Context, limit, offset int) ([]Source, i
 			last_scraped_at, 
 			discovered_at, 
 			COALESCE(classification_reason, ''),
+			COALESCE(ats_backed, FALSE),
+			COALESCE(recheck_count, 0),
 			COALESCE(last_error_type, ''),
 			COALESCE(last_error_message, ''),
 			last_error_at
@@ -327,6 +331,8 @@ func (s *Store) ListSources(ctx context.Context, limit, offset int) ([]Source, i
 			&lastScraped,
 			&discoveredAt,
 			&src.Classification,
+			&src.ATSBacked,
+			&src.RecheckCount,
 			&src.LastErrorType,
 			&src.LastErrorMsg,
 			&lastErrorAt,
@@ -356,6 +362,7 @@ func (s *Store) AddSource(
 	techRelated bool,
 	confidence float64,
 	reason string,
+	atsBacked bool,
 ) (
 	id int,
 	existed bool,
@@ -406,9 +413,10 @@ func (s *Store) AddSource(
 				tech_related = $9,
 				confidence = $10,
 				classification_reason = $11,
+				ats_backed = $12,
 				last_checked_at = NOW()
 			WHERE
-				id = $12`,
+				id = $13`,
 			rawURL,
 			normalized,
 			host,
@@ -420,6 +428,7 @@ func (s *Store) AddSource(
 			techRelated,
 			confidence,
 			reason,
+			atsBacked,
 			id,
 		)
 		return id, existed, err
@@ -440,6 +449,7 @@ func (s *Store) AddSource(
         		tech_related,
         		confidence,
         		classification_reason,
+        		ats_backed,
         		last_checked_at,
         		discovered_at
     		)
@@ -456,6 +466,7 @@ func (s *Store) AddSource(
         		$9,
         		$10,
         		$11,
+        		$12,
         		NOW(),
         		NOW()
     		)
@@ -471,6 +482,7 @@ func (s *Store) AddSource(
 		techRelated,
 		confidence,
 		reason,
+		atsBacked,
 	).Scan(&id)
 	return id, existed, err
 }
@@ -491,6 +503,21 @@ func (s *Store) MarkSourceScraped(ctx context.Context, sourceID int) error {
 	return err
 }
 
+func (s *Store) IncrementSourceRecheck(ctx context.Context, sourceID int) error {
+	_, err := s.db.ExecContext(
+		ctx,
+		`UPDATE
+			sources
+		SET
+			recheck_count = COALESCE(recheck_count, 0) + 1,
+			last_checked_at = NOW()
+		WHERE
+			id = $1`,
+		sourceID,
+	)
+	return err
+}
+
 func (s *Store) FindSourceByURL(ctx context.Context, rawURL string) (*Source, error) {
 	normalized, _, err := urlutil.Normalize(rawURL)
 	if err != nil {
@@ -506,7 +533,9 @@ func (s *Store) FindSourceByURL(ctx context.Context, rawURL string) (*Source, er
 			COALESCE(page_type, ''),
 			is_alias,
 			COALESCE(canonical_url, ''),
-			is_job_site
+			is_job_site,
+			COALESCE(ats_backed, FALSE),
+			COALESCE(recheck_count, 0)
 		FROM
 			sources
 		WHERE
@@ -528,6 +557,8 @@ func (s *Store) FindSourceByURL(ctx context.Context, rawURL string) (*Source, er
 		&src.IsAlias,
 		&src.CanonicalURL,
 		&src.IsJobSite,
+		&src.ATSBacked,
+		&src.RecheckCount,
 	); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil

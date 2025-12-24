@@ -1,12 +1,15 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strconv"
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/baxromumarov/job-hunter/internal/content"
+	"github.com/baxromumarov/job-hunter/internal/httpx"
 	"github.com/baxromumarov/job-hunter/internal/observability"
 	"github.com/baxromumarov/job-hunter/internal/store"
 	"github.com/baxromumarov/job-hunter/internal/urlutil"
@@ -106,9 +109,8 @@ func (s *Server) handleAddSource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pageType := urlutil.DetectPageType(normalized)
-	if pageType == urlutil.PageTypeNonJob || pageType == urlutil.PageTypeJobDetail {
-		_, existed, err := s.store.AddSource(r.Context(), normalized, req.SourceType, pageType, false, "", false, false, 0, "blocked path")
+	if !urlutil.IsDiscoveryEligible(normalized) {
+		_, existed, err := s.store.AddSource(r.Context(), normalized, req.SourceType, urlutil.PageTypeNonJob, false, "", false, false, 0, "ineligible_url", false)
 		if err != nil {
 			respondError(w, http.StatusInternalServerError, "Failed to save source: "+err.Error())
 			return
@@ -117,20 +119,72 @@ func (s *Server) handleAddSource(w http.ResponseWriter, r *http.Request) {
 			"is_job_site":  false,
 			"tech_related": false,
 			"confidence":   0.0,
-			"reason":       "Blocked by non-job path",
+			"reason":       "URL not eligible for discovery",
 			"existed":      existed,
 		})
 		return
 	}
 
-	canonicalURL, isAlias, err := s.store.ResolveCanonicalSource(r.Context(), normalized, host, pageType)
+	_, existed, err := s.store.AddSource(
+		r.Context(),
+		normalized,
+		req.SourceType,
+		urlutil.PageTypeCandidate,
+		false,
+		"",
+		false,
+		false,
+		0,
+		"candidate",
+		false,
+	)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "Failed to save candidate: "+err.Error())
+		return
+	}
+
+	fetcher := httpx.NewCollyFetcher("job-hunter-bot/1.0")
+	signals, err := content.Analyze(r.Context(), fetcher, normalized)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "Failed to fetch source content: "+err.Error())
+		return
+	}
+
+	if len(signals.ATSLinks) > 0 {
+		observability.IncATSDetected("api")
+		addATSSources(r.Context(), s.store, signals.ATSLinks)
+		_, _, _ = s.store.AddSource(r.Context(), normalized, req.SourceType, urlutil.PageTypeNonJob, false, "", false, false, 0.9, "ats_link", true)
+		respondJSON(w, http.StatusOK, map[string]interface{}{
+			"is_job_site":  true,
+			"tech_related": true,
+			"confidence":   0.9,
+			"reason":       "ats_link",
+			"existed":      existed,
+		})
+		return
+	}
+
+	decision := content.Classify(signals)
+	if decision.PageType == urlutil.PageTypeNonJob {
+		_, _, _ = s.store.AddSource(r.Context(), normalized, req.SourceType, urlutil.PageTypeNonJob, false, "", false, false, decision.Confidence, decision.Reason, false)
+		respondJSON(w, http.StatusOK, map[string]interface{}{
+			"is_job_site":  false,
+			"tech_related": false,
+			"confidence":   decision.Confidence,
+			"reason":       decision.Reason,
+			"existed":      existed,
+		})
+		return
+	}
+
+	canonicalURL, isAlias, err := s.store.ResolveCanonicalSource(r.Context(), normalized, host, decision.PageType)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "Failed to resolve canonical source: "+err.Error())
 		return
 	}
 
 	if isAlias {
-		_, existed, err := s.store.AddSource(r.Context(), normalized, req.SourceType, pageType, true, canonicalURL, false, false, 0, "alias")
+		_, existed, err := s.store.AddSource(r.Context(), normalized, req.SourceType, decision.PageType, true, canonicalURL, false, false, 0, "alias", false)
 		if err != nil {
 			respondError(w, http.StatusInternalServerError, "Failed to save source: "+err.Error())
 			return
@@ -144,28 +198,19 @@ func (s *Server) handleAddSource(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	canonicalURL = ""
 
-	// Trigger classification
-	// In a real app this might be async or queued
-	classification, err := s.classifier.Classify(r.Context(), normalized, "Mock Title", "Mock Meta", "Mock Text Sample from "+normalized)
-	if err != nil {
-		respondError(w, http.StatusInternalServerError, "Classification failed: "+err.Error())
-		return
-	}
-
-	// Save source to DB
-	_, existed, err := s.store.AddSource(
+	_, existed, err = s.store.AddSource(
 		r.Context(),
 		normalized,
 		req.SourceType,
-		pageType,
+		decision.PageType,
 		false,
-		canonicalURL,
-		classification.IsJobSite,
-		classification.TechRelated,
-		classification.Confidence,
-		classification.Reason,
+		"",
+		true,
+		true,
+		decision.Confidence,
+		decision.Reason,
+		false,
 	)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "Failed to save source: "+err.Error())
@@ -173,12 +218,40 @@ func (s *Server) handleAddSource(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respondJSON(w, http.StatusOK, map[string]interface{}{
-		"is_job_site":  classification.IsJobSite,
-		"tech_related": classification.TechRelated,
-		"confidence":   classification.Confidence,
-		"reason":       classification.Reason,
+		"is_job_site":  true,
+		"tech_related": true,
+		"confidence":   decision.Confidence,
+		"reason":       decision.Reason,
 		"existed":      existed,
 	})
+}
+
+func addATSSources(ctx context.Context, st *store.Store, links []string) {
+	seen := make(map[string]struct{})
+	for _, link := range links {
+		normalized, host, err := urlutil.NormalizeATSLink(link)
+		if err != nil || host == "" {
+			continue
+		}
+		if _, ok := seen[normalized]; ok {
+			continue
+		}
+		seen[normalized] = struct{}{}
+
+		pageType := urlutil.PageTypeJobList
+		canonicalURL, isAlias, err := st.ResolveCanonicalSource(ctx, normalized, host, pageType)
+		if err != nil {
+			observability.IncError(observability.ErrorStore, "api")
+			continue
+		}
+		if isAlias {
+			_, _, _ = st.AddSource(ctx, normalized, "job_board", pageType, true, canonicalURL, false, false, 0, "alias", false)
+			continue
+		}
+
+		observability.IncSourcesPromoted("api")
+		_, _, _ = st.AddSource(ctx, normalized, "job_board", pageType, false, "", true, true, 0.9, "ats_link", false)
+	}
 }
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
@@ -192,9 +265,14 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, map[string]interface{}{
 		"pages_crawled":     snapshot.PagesCrawled,
 		"jobs_discovered":   snapshot.JobsDiscovered,
+		"jobs_extracted":    snapshot.JobsExtracted,
 		"ai_calls":          snapshot.AICalls,
 		"errors_total":      snapshot.ErrorsTotal,
 		"crawl_avg_seconds": snapshot.CrawlSecondsAvg,
+		"urls_discovered":   snapshot.URLsDiscovered,
+		"sources_promoted":  snapshot.SourcesPromoted,
+		"ats_detected":      snapshot.ATSDetected,
+		"sources_zero_jobs": snapshot.SourcesZeroJobs,
 		"sources_total":     sourcesTotal,
 		"jobs_total":        jobsTotal,
 		"active_jobs":       activeJobs,

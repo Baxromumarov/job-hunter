@@ -9,9 +9,12 @@ import (
 	"time"
 
 	"github.com/baxromumarov/job-hunter/internal/ai"
+	"github.com/baxromumarov/job-hunter/internal/content"
+	"github.com/baxromumarov/job-hunter/internal/httpx"
 	"github.com/baxromumarov/job-hunter/internal/observability"
 	"github.com/baxromumarov/job-hunter/internal/scraper"
 	"github.com/baxromumarov/job-hunter/internal/store"
+	"github.com/baxromumarov/job-hunter/internal/urlutil"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/time/rate"
 )
@@ -23,6 +26,7 @@ type IngestionService struct {
 	keywords   []string
 	blockedLoc []string
 	profile    ai.CandidateProfile
+	fetcher    *httpx.CollyFetcher
 	hostLimits map[string]*rate.Limiter
 	hostMu     sync.Mutex
 }
@@ -37,6 +41,7 @@ func NewIngestionService(store *store.Store, matcher *MatcherService) *Ingestion
 		profile: ai.CandidateProfile{
 			TechStack: []string{"golang", "backend", "grpc", "rest", "postgresql", "redis", "docker", "linux"},
 		},
+		fetcher:    httpx.NewCollyFetcher("job-hunter-bot/1.0"),
 		hostLimits: make(map[string]*rate.Limiter),
 	}
 }
@@ -225,6 +230,14 @@ func (s *IngestionService) processSource(ctx context.Context, src store.Source, 
 		slog.Error("ingestion scrape failed", "url", src.URL, "error", err)
 		return
 	}
+	if len(rawJobs) == 0 {
+		if retried, handled := s.retrySource(ctx, src, scr, since); handled {
+			rawJobs = retried
+		}
+	}
+	if len(rawJobs) == 0 {
+		observability.IncSourcesZeroJobs(src.Type)
+	}
 
 	for _, raw := range rawJobs {
 		select {
@@ -273,6 +286,7 @@ func (s *IngestionService) processSource(ctx context.Context, src store.Source, 
 			continue
 		}
 		observability.IncJobsDiscovered(src.Type)
+		observability.IncJobsExtracted(src.Type)
 	}
 
 	if err := s.store.MarkSourceScraped(ctx, src.ID); err != nil {
@@ -281,6 +295,105 @@ func (s *IngestionService) processSource(ctx context.Context, src store.Source, 
 		return
 	}
 	_ = s.store.ClearSourceError(ctx, src.ID)
+}
+
+func (s *IngestionService) retrySource(ctx context.Context, src store.Source, scr scraper.JobScraper, since time.Time) ([]scraper.RawJob, bool) {
+	if src.Type == "job_board" {
+		return nil, false
+	}
+
+	signals, err := content.Analyze(ctx, s.fetcher, src.URL)
+	if err != nil {
+		errType := observability.ClassifyFetchError(err)
+		observability.IncError(errType, "ingestion")
+		_ = s.store.MarkSourceError(ctx, src.ID, errType, err.Error())
+		slog.Error("ingestion retry analyze failed", "url", src.URL, "error", err)
+		return nil, false
+	}
+
+	if len(signals.ATSLinks) > 0 {
+		observability.IncATSDetected("ingestion")
+		s.addATSSources(ctx, signals.ATSLinks)
+		s.markSourceNonJobPermanent(ctx, src, "ats_link", true)
+		return nil, true
+	}
+
+	if !content.HasJobSignals(signals) {
+		return nil, false
+	}
+
+	if src.RecheckCount >= 1 {
+		s.markSourceNonJobPermanent(ctx, src, "no_jobs_after_retry", false)
+		return nil, true
+	}
+
+	retryable, ok := scr.(scraper.RelaxedScraper)
+	if !ok {
+		s.markSourceNonJobPermanent(ctx, src, "no_jobs_after_retry", false)
+		return nil, true
+	}
+
+	if err := s.store.IncrementSourceRecheck(ctx, src.ID); err != nil {
+		observability.IncError(observability.ErrorStore, "ingestion")
+		slog.Error("ingestion recheck increment failed", "source_id", src.ID, "error", err)
+		return nil, true
+	}
+
+	jobs, err := retryable.FetchJobsRelaxed(since)
+	if err != nil {
+		errType := observability.ClassifyScrapeError(err)
+		observability.IncError(errType, "ingestion")
+		_ = s.store.MarkSourceError(ctx, src.ID, errType, err.Error())
+		slog.Error("ingestion retry scrape failed", "url", src.URL, "error", err)
+		return nil, true
+	}
+	if len(jobs) == 0 {
+		s.markSourceNonJobPermanent(ctx, src, "no_jobs_after_retry", false)
+	}
+	return jobs, true
+}
+
+func (s *IngestionService) addATSSources(ctx context.Context, links []string) {
+	seen := make(map[string]struct{})
+	for _, link := range links {
+		normalized, host, err := urlutil.NormalizeATSLink(link)
+		if err != nil || host == "" {
+			continue
+		}
+		if _, ok := seen[normalized]; ok {
+			continue
+		}
+		seen[normalized] = struct{}{}
+
+		pageType := urlutil.PageTypeJobList
+		canonicalURL, isAlias, err := s.store.ResolveCanonicalSource(ctx, normalized, host, pageType)
+		if err != nil {
+			observability.IncError(observability.ErrorStore, "ingestion")
+			slog.Error("ingestion canonical resolve failed", "url", normalized, "error", err)
+			continue
+		}
+		if isAlias {
+			_, _, _ = s.store.AddSource(ctx, normalized, "job_board", pageType, true, canonicalURL, false, false, 0, "alias", false)
+			continue
+		}
+
+		observability.IncSourcesPromoted("ingestion")
+		if _, _, err := s.store.AddSource(ctx, normalized, "job_board", pageType, false, "", true, true, 0.9, "ats_link", false); err != nil {
+			observability.IncError(observability.ErrorStore, "ingestion")
+			slog.Error("ingestion store ATS source failed", "url", normalized, "error", err)
+		}
+	}
+}
+
+func (s *IngestionService) markSourceNonJobPermanent(ctx context.Context, src store.Source, reason string, atsBacked bool) {
+	confidence := 0.2
+	if atsBacked {
+		confidence = 0.9
+	}
+	if _, _, err := s.store.AddSource(ctx, src.URL, src.Type, urlutil.PageTypeNonJobPermanent, false, "", false, false, confidence, reason, atsBacked); err != nil {
+		observability.IncError(observability.ErrorStore, "ingestion")
+		slog.Error("ingestion mark non-job failed", "url", src.URL, "error", err)
+	}
 }
 
 func (s *IngestionService) hostLimiter(rawURL string) *rate.Limiter {

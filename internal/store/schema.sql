@@ -11,6 +11,8 @@ CREATE TABLE IF NOT EXISTS sources (
     page_type TEXT DEFAULT 'non_job',
     is_alias BOOLEAN DEFAULT FALSE,
     canonical_url TEXT,
+    ats_backed BOOLEAN DEFAULT FALSE,
+    recheck_count INT DEFAULT 0,
     last_error_type TEXT,
     last_error_message TEXT,
     last_error_at TIMESTAMP WITH TIME ZONE,
@@ -51,6 +53,8 @@ ALTER TABLE sources ADD COLUMN IF NOT EXISTS normalized_url TEXT;
 ALTER TABLE sources ADD COLUMN IF NOT EXISTS page_type TEXT DEFAULT 'non_job';
 ALTER TABLE sources ADD COLUMN IF NOT EXISTS is_alias BOOLEAN DEFAULT FALSE;
 ALTER TABLE sources ADD COLUMN IF NOT EXISTS canonical_url TEXT;
+ALTER TABLE sources ADD COLUMN IF NOT EXISTS ats_backed BOOLEAN DEFAULT FALSE;
+ALTER TABLE sources ADD COLUMN IF NOT EXISTS recheck_count INT DEFAULT 0;
 ALTER TABLE sources ADD COLUMN IF NOT EXISTS last_error_type TEXT;
 ALTER TABLE sources ADD COLUMN IF NOT EXISTS last_error_message TEXT;
 ALTER TABLE sources ADD COLUMN IF NOT EXISTS last_error_at TIMESTAMP WITH TIME ZONE;
