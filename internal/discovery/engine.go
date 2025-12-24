@@ -2,9 +2,12 @@ package discovery
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"strings"
 	"time"
+
+	_ "embed"
 
 	"github.com/baxromumarov/job-hunter/internal/core"
 	"github.com/baxromumarov/job-hunter/internal/store"
@@ -16,28 +19,25 @@ type Engine struct {
 }
 
 type candidateSource struct {
-	URL        string
-	SourceType string
-	Title      string
-	Meta       string
-	Text       string
+	URL        string `json:"url"`
+	SourceType string `json:"source_type"`
+	Title      string `json:"title"`
+	Meta       string `json:"meta"`
+	Text       string `json:"text"`
 }
 
-var seedCandidates = []candidateSource{
-	{URL: "https://remoteok.com/remote-dev-jobs", SourceType: "job_board", Title: "RemoteOK programming jobs", Meta: "Remote developer jobs", Text: "Remote OK lists software engineering, backend and golang roles posted daily."},
-	{URL: "https://weworkremotely.com/categories/remote-programming-jobs", SourceType: "job_board", Title: "WeWorkRemotely programming jobs", Meta: "Remote programming jobs", Text: "Remote programming and backend roles including Go developers."},
-	{URL: "https://www.linkedin.com/jobs/search/?keywords=golang", SourceType: "job_board", Title: "LinkedIn Golang search", Meta: "Golang backend roles", Text: "LinkedIn search results for Golang backend engineer positions."},
-	{URL: "https://arc.dev/remote-software-jobs", SourceType: "job_board", Title: "Arc remote software jobs", Meta: "Remote software engineer jobs", Text: "Remote backend and Go jobs curated for engineers."},
-	{URL: "https://stackoverflow.com/jobs", SourceType: "job_board", Title: "StackOverflow jobs", Meta: "Developer jobs", Text: "Developer jobs board."},
-	{URL: "https://jobs.lever.co/airbnb", SourceType: "company_page", Title: "Airbnb careers", Meta: "Join Airbnb engineering", Text: "Airbnb engineering teams hiring backend and infrastructure roles."},
-	{URL: "https://boards.greenhouse.io/stripe", SourceType: "company_page", Title: "Stripe careers", Meta: "Stripe is hiring engineers", Text: "Stripe engineering and backend services roles."},
-	{URL: "https://vercel.com/careers", SourceType: "company_page", Title: "Vercel Careers", Meta: "Work on Vercel platform", Text: "Hiring backend, Go, and platform engineers."},
-	{URL: "https://supabase.com/careers", SourceType: "company_page", Title: "Supabase Careers", Meta: "Join Supabase", Text: "Database and backend engineering positions."},
-	{URL: "https://jobs.github.com/positions", SourceType: "job_board", Title: "GitHub Jobs", Meta: "Software engineering roles", Text: "Open software engineering positions including Go developers."},
-	{URL: "https://builtin.com/jobs", SourceType: "job_board", Title: "BuiltIn tech jobs", Meta: "Tech job board", Text: "Tech job board with backend, Go, and cloud roles."},
-	{URL: "https://lever.co", SourceType: "job_board", Title: "Lever hosted boards", Meta: "Career platform", Text: "Job listings platform commonly used for careers pages."},
-	{URL: "https://greenhouse.io", SourceType: "job_board", Title: "Greenhouse job boards", Meta: "Career platform", Text: "Career boards for many startups and tech companies."},
-	{URL: "https://jobs.ashbyhq.com", SourceType: "job_board", Title: "Ashby job boards", Meta: "Job boards", Text: "Ashby-hosted job boards used by tech companies."},
+//go:embed seeds.json
+var seedsJSON []byte
+
+var seedCandidates = loadSeedCandidates()
+
+func loadSeedCandidates() []candidateSource {
+	var seeds []candidateSource
+	if err := json.Unmarshal(seedsJSON, &seeds); err != nil {
+		log.Printf("Discovery: failed to load embedded seeds: %v", err)
+		return nil
+	}
+	return seeds
 }
 
 func NewEngine(store *store.Store, classifier *core.ClassifierService) *Engine {

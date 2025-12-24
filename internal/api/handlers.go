@@ -14,7 +14,7 @@ import (
 func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	limit, offset := parsePagination(r, 20)
 
-	jobs, total, err := s.store.GetJobs(r.Context(), limit, offset)
+	jobs, total, activeTotal, err := s.store.GetJobs(r.Context(), limit, offset)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "Failed to fetch jobs: "+err.Error())
 		return
@@ -24,10 +24,11 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		jobs = []store.Job{}
 	}
 	respondJSON(w, http.StatusOK, map[string]interface{}{
-		"items":  jobs,
-		"limit":  limit,
-		"offset": offset,
-		"total":  total,
+		"items":        jobs,
+		"limit":        limit,
+		"offset":       offset,
+		"total":        total,
+		"active_total": activeTotal,
 	})
 }
 

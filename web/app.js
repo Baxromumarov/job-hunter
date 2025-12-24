@@ -17,6 +17,7 @@ const state = {
     jobsTotal: 0,
     sourcesTotal: 0,
     statusFilter: 'active', // active, applied, rejected, closed, all
+    activeTotal: 0,
 };
 
 const escapeMap = {
@@ -116,6 +117,7 @@ function renderJobs(jobs) {
     state.jobs = jobs;
     if (!Array.isArray(jobs) || jobs.length === 0) {
         jobList.innerHTML = '<div class="card">No jobs yet. We will pull fresh Go/backend roles automatically.</div>';
+        updateActiveCount();
         return;
     }
     const filtered = jobs.filter((j) => {
@@ -136,6 +138,7 @@ function renderJobs(jobs) {
         ${filtered.map(renderJobCard).join('') || '<div class="card">No jobs matching this filter.</div>'}
         ${renderPagination('jobs', state.jobsPage, state.jobsTotal)}
     `;
+    updateActiveCount();
 }
 
 function renderSources(items) {
@@ -172,6 +175,7 @@ async function fetchJobs(page = 0) {
         const payload = await response.json();
         const items = payload.items || payload || [];
         state.jobsTotal = payload.total || items.length;
+        state.activeTotal = payload.active_total || state.activeTotal;
         renderJobs(items);
     } catch (error) {
         jobList.innerHTML = `<div class="card" style="color: red">Error loading jobs: ${error.message}</div>`;
@@ -361,6 +365,12 @@ function setStatusFilter(filter) {
         el.classList.toggle('active', match);
     });
     renderJobs(state.jobs);
+}
+
+function updateActiveCount() {
+    const el = document.getElementById('activeCount');
+    if (!el) return;
+    el.textContent = state.activeTotal || state.jobs.filter((j) => !j.rejected && !j.closed).length || 0;
 }
 
 function showApplyPrompt() {

@@ -108,7 +108,7 @@ type Job struct {
 	CreatedAt    time.Time  `json:"created_at"`
 }
 
-func (s *Store) GetJobs(ctx context.Context, limit, offset int) ([]Job, int, error) {
+func (s *Store) GetJobs(ctx context.Context, limit, offset int) ([]Job, int, int, error) {
 	limit, offset = normalizePagination(limit, offset)
 
 	var total int
@@ -121,7 +121,17 @@ func (s *Store) GetJobs(ctx context.Context, limit, offset int) ([]Job, int, err
 	).Scan(
 		&total,
 	); err != nil {
-		return nil, 0, err
+		return nil, 0, 0, err
+	}
+
+	var activeTotal int
+	if err := s.db.QueryRowContext(
+		ctx,
+		`SELECT COUNT(*) FROM jobs WHERE rejected = FALSE AND closed = FALSE`,
+	).Scan(
+		&activeTotal,
+	); err != nil {
+		return nil, 0, 0, err
 	}
 
 	rows, err := s.db.QueryContext(
@@ -162,7 +172,7 @@ func (s *Store) GetJobs(ctx context.Context, limit, offset int) ([]Job, int, err
 		offset,
 	)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, 0, err
 	}
 	defer rows.Close()
 
@@ -200,7 +210,7 @@ func (s *Store) GetJobs(ctx context.Context, limit, offset int) ([]Job, int, err
 			&j.Description,
 			&createdAt,
 		); err != nil {
-			return nil, 0, err
+			return nil, 0, 0, err
 		}
 
 		if sourceURL.Valid {
@@ -219,7 +229,7 @@ func (s *Store) GetJobs(ctx context.Context, limit, offset int) ([]Job, int, err
 
 		jobs = append(jobs, j)
 	}
-	return jobs, total, rows.Err()
+	return jobs, total, activeTotal, rows.Err()
 }
 
 func (s *Store) ListSources(ctx context.Context, limit, offset int) ([]Source, int, error) {
@@ -487,7 +497,7 @@ func (s *Store) MarkJobApplied(ctx context.Context, jobID int) error {
 
 func (s *Store) MarkJobRejected(ctx context.Context, jobID int) error {
 	_, err := s.db.ExecContext(
-		ctx, 
+		ctx,
 		`UPDATE 
 			jobs
 		SET 
@@ -519,7 +529,7 @@ func (s *Store) MarkJobClosed(ctx context.Context, jobID int) error {
 
 func (s *Store) DeleteOldJobs(ctx context.Context, olderThan time.Duration) (int64, error) {
 	cutoff := time.Now().Add(-olderThan)
-	
+
 	res, err := s.db.ExecContext(
 		ctx,
 		`DELETE FROM 

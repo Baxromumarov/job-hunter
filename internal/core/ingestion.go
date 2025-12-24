@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/baxromumarov/job-hunter/internal/ai"
@@ -64,66 +65,30 @@ func (s *IngestionService) scrapeOnce(ctx context.Context) {
 
 	since := time.Now().Add(-10 * 24 * time.Hour)
 
-	for _, src := range sources {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
+	workerCount := 6
+	srcCh := make(chan store.Source)
 
-		scr := s.pickScraper(src.URL, src.Type)
-		rawJobs, err := scr.FetchJobs(since)
-		if err != nil {
-			log.Printf("Ingestion: scrape failed for %s: %v", src.URL, err)
-			continue
-		}
-
-		for _, raw := range rawJobs {
-			postDate := raw.PostedAt
-			if postDate.IsZero() {
-				postDate = time.Now()
+	var wg sync.WaitGroup
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for src := range srcCh {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+				s.processSource(ctx, src, since)
 			}
-			if postDate.Before(since) {
-				continue
-			}
-
-			desc := raw.Description
-			if normalized, err := s.normalizer.Normalize(raw.Description); err == nil && normalized != "" {
-				desc = normalized
-			}
-
-			if s.isBlockedLocation(raw.Location) {
-				continue
-			}
-
-			finalScore, summary := s.scoreJob(ctx, raw.Title, desc)
-			if finalScore < 70 {
-				continue
-			}
-
-			job := store.Job{
-				SourceID:     src.ID,
-				SourceURL:    src.URL,
-				SourceType:   src.Type,
-				URL:          raw.URL,
-				Title:        raw.Title,
-				Description:  desc,
-				Company:      raw.Company,
-				Location:     raw.Location,
-				MatchScore:   finalScore,
-				MatchSummary: summary,
-				PostedAt:     &postDate,
-			}
-
-			if err := s.store.SaveJob(ctx, job); err != nil {
-				log.Printf("Ingestion: failed to save job %s: %v", raw.URL, err)
-			}
-		}
-
-		if err := s.store.MarkSourceScraped(ctx, src.ID); err != nil {
-			log.Printf("Ingestion: failed to mark source %d scraped: %v", src.ID, err)
-		}
+		}()
 	}
+
+	for _, src := range sources {
+		srcCh <- src
+	}
+	close(srcCh)
+	wg.Wait()
 }
 
 func (s *IngestionService) cleanupLoop(ctx context.Context, interval, retention time.Duration) {
@@ -225,5 +190,66 @@ func (s *IngestionService) pickScraper(rawURL, sourceType string) scraper.JobScr
 		// Fall back to generic
 		_ = sourceType
 		return scraper.NewGenericScraper(rawURL)
+	}
+}
+
+func (s *IngestionService) processSource(ctx context.Context, src store.Source, since time.Time) {
+	scr := s.pickScraper(src.URL, src.Type)
+	rawJobs, err := scr.FetchJobs(since)
+	if err != nil {
+		log.Printf("Ingestion: scrape failed for %s: %v", src.URL, err)
+		return
+	}
+
+	for _, raw := range rawJobs {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		postDate := raw.PostedAt
+		if postDate.IsZero() {
+			postDate = time.Now()
+		}
+		if postDate.Before(since) {
+			continue
+		}
+
+		desc := raw.Description
+		if normalized, err := s.normalizer.Normalize(raw.Description); err == nil && normalized != "" {
+			desc = normalized
+		}
+
+		if s.isBlockedLocation(raw.Location) {
+			continue
+		}
+
+		finalScore, summary := s.scoreJob(ctx, raw.Title, desc)
+		if finalScore < 70 {
+			continue
+		}
+
+		job := store.Job{
+			SourceID:     src.ID,
+			SourceURL:    src.URL,
+			SourceType:   src.Type,
+			URL:          raw.URL,
+			Title:        raw.Title,
+			Description:  desc,
+			Company:      raw.Company,
+			Location:     raw.Location,
+			MatchScore:   finalScore,
+			MatchSummary: summary,
+			PostedAt:     &postDate,
+		}
+
+		if err := s.store.SaveJob(ctx, job); err != nil {
+			log.Printf("Ingestion: failed to save job %s: %v", raw.URL, err)
+		}
+	}
+
+	if err := s.store.MarkSourceScraped(ctx, src.ID); err != nil {
+		log.Printf("Ingestion: failed to mark source %d scraped: %v", src.ID, err)
 	}
 }

@@ -1,0 +1,100 @@
+[
+  {
+    "url": "https://remoteok.com/remote-dev-jobs",
+    "source_type": "job_board",
+    "title": "RemoteOK programming jobs",
+    "meta": "Remote developer jobs",
+    "text": "Remote OK lists software engineering, backend and golang roles posted daily."
+  },
+  {
+    "url": "https://weworkremotely.com/categories/remote-programming-jobs",
+    "source_type": "job_board",
+    "title": "WeWorkRemotely programming jobs",
+    "meta": "Remote programming jobs",
+    "text": "Remote programming and backend roles including Go developers."
+  },
+  {
+    "url": "https://www.linkedin.com/jobs/search/?keywords=golang",
+    "source_type": "job_board",
+    "title": "LinkedIn Golang search",
+    "meta": "Golang backend roles",
+    "text": "LinkedIn search results for Golang backend engineer positions."
+  },
+  {
+    "url": "https://arc.dev/remote-software-jobs",
+    "source_type": "job_board",
+    "title": "Arc remote software jobs",
+    "meta": "Remote software engineer jobs",
+    "text": "Remote backend and Go jobs curated for engineers."
+  },
+  {
+    "url": "https://stackoverflow.com/jobs",
+    "source_type": "job_board",
+    "title": "StackOverflow jobs",
+    "meta": "Developer jobs",
+    "text": "Developer jobs board."
+  },
+  {
+    "url": "https://jobs.lever.co/airbnb",
+    "source_type": "company_page",
+    "title": "Airbnb careers",
+    "meta": "Join Airbnb engineering",
+    "text": "Airbnb engineering teams hiring backend and infrastructure roles."
+  },
+  {
+    "url": "https://boards.greenhouse.io/stripe",
+    "source_type": "company_page",
+    "title": "Stripe careers",
+    "meta": "Stripe is hiring engineers",
+    "text": "Stripe engineering and backend services roles."
+  },
+  {
+    "url": "https://vercel.com/careers",
+    "source_type": "company_page",
+    "title": "Vercel Careers",
+    "meta": "Work on Vercel platform",
+    "text": "Hiring backend, Go, and platform engineers."
+  },
+  {
+    "url": "https://supabase.com/careers",
+    "source_type": "company_page",
+    "title": "Supabase Careers",
+    "meta": "Join Supabase",
+    "text": "Database and backend engineering positions."
+  },
+  {
+    "url": "https://jobs.github.com/positions",
+    "source_type": "job_board",
+    "title": "GitHub Jobs",
+    "meta": "Software engineering roles",
+    "text": "Open software engineering positions including Go developers."
+  },
+  {
+    "url": "https://builtin.com/jobs",
+    "source_type": "job_board",
+    "title": "BuiltIn tech jobs",
+    "meta": "Tech job board",
+    "text": "Tech job board with backend, Go, and cloud roles."
+  },
+  {
+    "url": "https://lever.co",
+    "source_type": "job_board",
+    "title": "Lever hosted boards",
+    "meta": "Career platform",
+    "text": "Job listings platform commonly used for careers pages."
+  },
+  {
+    "url": "https://greenhouse.io",
+    "source_type": "job_board",
+    "title": "Greenhouse job boards",
+    "meta": "Career platform",
+    "text": "Career boards for many startups and tech companies."
+  },
+  {
+    "url": "https://jobs.ashbyhq.com",
+    "source_type": "job_board",
+    "title": "Ashby job boards",
+    "meta": "Job boards",
+    "text": "Ashby-hosted job boards used by tech companies."
+  }
+]
