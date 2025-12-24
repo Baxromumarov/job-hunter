@@ -46,6 +46,8 @@ func (s *Server) setupRoutes() {
 	s.router.Get("/health", s.handleHealth)
 	s.router.Get("/jobs", s.handleListJobs)
 	s.router.Post("/jobs/{id}/apply", s.handleApplyJob)
+	s.router.Post("/jobs/{id}/reject", s.handleRejectJob)
+	s.router.Post("/jobs/{id}/close", s.handleCloseJob)
 	s.router.Get("/sources", s.handleListSources)
 	s.router.Post("/sources", s.handleAddSource)
 

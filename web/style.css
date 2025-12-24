@@ -318,13 +318,13 @@ button.ghost {
 }
 
 .confirm-content {
-    background: linear-gradient(140deg, rgba(109, 40, 217, 0.3), rgba(34, 211, 238, 0.12));
+    background: radial-gradient(circle at 20% 20%, rgba(34, 211, 238, 0.18), transparent 45%), linear-gradient(145deg, rgba(19, 24, 42, 0.95), rgba(26, 31, 55, 0.95));
     color: var(--text);
     width: min(420px, 90vw);
     border-radius: 16px;
     padding: 22px;
-    border: 1px solid var(--border);
-    box-shadow: 0 22px 60px rgba(0, 0, 0, 0.35);
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    box-shadow: 0 26px 70px rgba(0, 0, 0, 0.55);
 }
 
 .modal-header {
@@ -449,6 +449,32 @@ button.ghost {
 .badge.subtle {
     background: rgba(109, 40, 217, 0.2);
     color: #cbd5ff;
+}
+
+.filter-bar {
+    display: inline-flex;
+    gap: 8px;
+    margin: 4px 0 16px 0;
+    padding: 6px;
+    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.filter-btn {
+    border: none;
+    background: transparent;
+    color: var(--text);
+    padding: 8px 12px;
+    border-radius: 10px;
+    cursor: pointer;
+    font-weight: 600;
+    transition: background 0.1s ease, transform 0.08s ease;
+}
+
+.filter-btn.active {
+    background: linear-gradient(135deg, rgba(34, 211, 238, 0.2), rgba(109, 40, 217, 0.3));
+    border: 1px solid rgba(255, 255, 255, 0.15);
 }
 
 .loading {

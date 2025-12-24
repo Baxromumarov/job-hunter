@@ -26,6 +26,10 @@ CREATE TABLE IF NOT EXISTS jobs (
     match_score INT DEFAULT 0,
     match_summary TEXT, -- JSON or text summary
     applied BOOLEAN DEFAULT FALSE,
+    rejected BOOLEAN DEFAULT FALSE,
+    closed BOOLEAN DEFAULT FALSE,
+    closed_at TIMESTAMP WITH TIME ZONE,
+    rejected_at TIMESTAMP WITH TIME ZONE,
     applied_at TIMESTAMP WITH TIME ZONE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
@@ -37,7 +41,13 @@ ALTER TABLE sources ADD COLUMN IF NOT EXISTS classification_reason TEXT;
 
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS applied_at TIMESTAMP WITH TIME ZONE;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS source_type TEXT;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS rejected BOOLEAN DEFAULT FALSE;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS rejected_at TIMESTAMP WITH TIME ZONE;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS closed BOOLEAN DEFAULT FALSE;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS closed_at TIMESTAMP WITH TIME ZONE;
 
 CREATE INDEX IF NOT EXISTS idx_jobs_match_score ON jobs(match_score);
 CREATE INDEX IF NOT EXISTS idx_jobs_created_at ON jobs(created_at);
 CREATE INDEX IF NOT EXISTS idx_jobs_applied_at ON jobs(applied_at);
+CREATE INDEX IF NOT EXISTS idx_jobs_rejected ON jobs(rejected);
+CREATE INDEX IF NOT EXISTS idx_jobs_closed ON jobs(closed);

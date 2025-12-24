@@ -12,7 +12,7 @@
     <div class="container">
         <header>
             <p class="eyebrow">Autonomous pipeline</p>
-            <h1>Job Hunter AI ✦</h1>
+            <h1>Job Hunter AI </h1>
             <p>Futuristic job radar: auto-discovers sources, scrapes the last 10 days, and matches Go/backend roles you can act on fast.</p>
         </header>
 
@@ -51,6 +51,13 @@
                     <p class="hint">Filtered for Go backend stack. Jobs expire after 30 days so you only see fresh leads.</p>
                 </div>
                 <span class="badge subtle">Auto-matched</span>
+            </div>
+            <div class="filter-bar">
+                <button class="filter-btn active" id="filterActive" onclick="setStatusFilter('active')">Active</button>
+                <button class="filter-btn" id="filterApplied" onclick="setStatusFilter('applied')">Applied</button>
+                <button class="filter-btn" id="filterRejected" onclick="setStatusFilter('rejected')">Not a match</button>
+                <button class="filter-btn" id="filterClosed" onclick="setStatusFilter('closed')">Closed</button>
+                <button class="filter-btn" id="filterAll" onclick="setStatusFilter('all')">All</button>
             </div>
             <div id="jobList" class="job-list">
                 <!-- Jobs will be populated here -->

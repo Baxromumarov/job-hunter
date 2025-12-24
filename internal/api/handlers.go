@@ -136,3 +136,35 @@ func (s *Server) handleApplyJob(w http.ResponseWriter, r *http.Request) {
 
 	respondJSON(w, http.StatusOK, map[string]bool{"applied": true})
 }
+
+func (s *Server) handleRejectJob(w http.ResponseWriter, r *http.Request) {
+	jobIDStr := chi.URLParam(r, "id")
+	jobID, err := strconv.Atoi(jobIDStr)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid job ID")
+		return
+	}
+
+	if err := s.store.MarkJobRejected(r.Context(), jobID); err != nil {
+		respondError(w, http.StatusInternalServerError, "Failed to mark job as not a match: "+err.Error())
+		return
+	}
+
+	respondJSON(w, http.StatusOK, map[string]bool{"rejected": true})
+}
+
+func (s *Server) handleCloseJob(w http.ResponseWriter, r *http.Request) {
+	jobIDStr := chi.URLParam(r, "id")
+	jobID, err := strconv.Atoi(jobIDStr)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid job ID")
+		return
+	}
+
+	if err := s.store.MarkJobClosed(r.Context(), jobID); err != nil {
+		respondError(w, http.StatusInternalServerError, "Failed to mark job as closed: "+err.Error())
+		return
+	}
+
+	respondJSON(w, http.StatusOK, map[string]bool{"closed": true})
+}

@@ -16,6 +16,7 @@ const state = {
     pendingApply: null,
     jobsTotal: 0,
     sourcesTotal: 0,
+    statusFilter: 'active', // active, applied, rejected, closed, all
 };
 
 const escapeMap = {
@@ -69,13 +70,21 @@ function renderJobCard(job) {
     const posted = formatDate(job.posted_at || job.created_at);
     const description = shortenText(job.description || 'No description provided yet.');
 
+    const statusPill = job.closed
+        ? '<span class="pill error" style="margin-left:8px;">Closed</span>'
+        : job.rejected
+        ? '<span class="pill error" style="margin-left:8px;">Not a match</span>'
+        : job.applied
+        ? '<span class="pill success" style="margin-left:8px;">Applied</span>'
+        : '';
+
     return `
         <div class="job-card card glow ${applied ? 'applied' : ''}" onclick="showJobDetail(${job.id})">
             <div class="job-header">
                 <div>
                     <p class="eyebrow">${escapeHTML(source)} ${job.source_type ? '• ' + escapeHTML(job.source_type) : ''}</p>
                     <h3>${escapeHTML(job.title || 'Untitled role')}</h3>
-                    <div class="job-meta">${escapeHTML(job.company || 'Unknown')} • ${escapeHTML(job.location || 'Remote')} ${posted ? '• ' + posted : ''}</div>
+                    <div class="job-meta">${escapeHTML(job.company || 'Unknown')} • ${escapeHTML(job.location || 'Remote')} ${posted ? '• ' + posted : ''} ${statusPill}</div>
                 </div>
                 <span class="score-badge">${job.match_score || 0}% match</span>
             </div>
@@ -109,8 +118,22 @@ function renderJobs(jobs) {
         jobList.innerHTML = '<div class="card">No jobs yet. We will pull fresh Go/backend roles automatically.</div>';
         return;
     }
+    const filtered = jobs.filter((j) => {
+        switch (state.statusFilter) {
+        case 'applied':
+            return j.applied;
+        case 'rejected':
+            return j.rejected;
+        case 'closed':
+            return j.closed;
+        case 'active':
+            return !j.rejected && !j.closed;
+        default:
+            return true;
+        }
+    });
     jobList.innerHTML = `
-        ${jobs.map(renderJobCard).join('')}
+        ${filtered.map(renderJobCard).join('') || '<div class="card">No jobs matching this filter.</div>'}
         ${renderPagination('jobs', state.jobsPage, state.jobsTotal)}
     `;
 }
@@ -328,6 +351,18 @@ function setTab(tab) {
     }
 }
 
+function setStatusFilter(filter) {
+    state.statusFilter = filter;
+    const ids = ['filterActive', 'filterApplied', 'filterRejected', 'filterClosed', 'filterAll'];
+    ids.forEach((id) => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        const match = id.toLowerCase().includes(filter);
+        el.classList.toggle('active', match);
+    });
+    renderJobs(state.jobs);
+}
+
 function showApplyPrompt() {
     if (!applyModal || !state.pendingApply) return;
     applyModal.innerHTML = `
@@ -336,6 +371,8 @@ function showApplyPrompt() {
             <p class="muted-text" style="margin: 0 0 14px 0;">We opened the listing in a new tab. Mark this job as applied to gray it out.</p>
             <div class="modal-actions" style="justify-content: flex-end; gap: 10px;">
                 <button class="ghost" onclick="closeApplyPrompt(event)">Cancel</button>
+                <button class="ghost" onclick="rejectJob(event)">Not a match</button>
+                <button class="ghost" onclick="closeJob(event)">Closed</button>
                 <button onclick="confirmApplied(event)">Yes, applied</button>
             </div>
         </div>
@@ -368,6 +405,48 @@ async function confirmApplied(event) {
         closeJobModal();
     } catch (error) {
         alert(`Could not mark as applied: ${error.message}`);
+    } finally {
+        closeApplyPrompt();
+    }
+}
+
+async function rejectJob(event) {
+    if (event) event.stopPropagation();
+    const pending = state.pendingApply;
+    if (!pending) {
+        closeApplyPrompt();
+        return;
+    }
+    try {
+        const response = await fetch(`${API_URL}/jobs/${pending.id}/reject`, { method: 'POST' });
+        if (!response.ok) {
+            throw new Error('Failed to mark as not a match');
+        }
+        fetchJobs(state.jobsPage);
+        closeJobModal();
+    } catch (error) {
+        alert(`Could not mark as not a match: ${error.message}`);
+    } finally {
+        closeApplyPrompt();
+    }
+}
+
+async function closeJob(event) {
+    if (event) event.stopPropagation();
+    const pending = state.pendingApply;
+    if (!pending) {
+        closeApplyPrompt();
+        return;
+    }
+    try {
+        const response = await fetch(`${API_URL}/jobs/${pending.id}/close`, { method: 'POST' });
+        if (!response.ok) {
+            throw new Error('Failed to mark as closed');
+        }
+        fetchJobs(state.jobsPage);
+        closeJobModal();
+    } catch (error) {
+        alert(`Could not mark as closed: ${error.message}`);
     } finally {
         closeApplyPrompt();
     }

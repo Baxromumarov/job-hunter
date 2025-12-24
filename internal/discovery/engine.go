@@ -28,6 +28,7 @@ var seedCandidates = []candidateSource{
 	{URL: "https://weworkremotely.com/categories/remote-programming-jobs", SourceType: "job_board", Title: "WeWorkRemotely programming jobs", Meta: "Remote programming jobs", Text: "Remote programming and backend roles including Go developers."},
 	{URL: "https://www.linkedin.com/jobs/search/?keywords=golang", SourceType: "job_board", Title: "LinkedIn Golang search", Meta: "Golang backend roles", Text: "LinkedIn search results for Golang backend engineer positions."},
 	{URL: "https://arc.dev/remote-software-jobs", SourceType: "job_board", Title: "Arc remote software jobs", Meta: "Remote software engineer jobs", Text: "Remote backend and Go jobs curated for engineers."},
+	{URL: "https://stackoverflow.com/jobs", SourceType: "job_board", Title: "StackOverflow jobs", Meta: "Developer jobs", Text: "Developer jobs board."},
 	{URL: "https://jobs.lever.co/airbnb", SourceType: "company_page", Title: "Airbnb careers", Meta: "Join Airbnb engineering", Text: "Airbnb engineering teams hiring backend and infrastructure roles."},
 	{URL: "https://boards.greenhouse.io/stripe", SourceType: "company_page", Title: "Stripe careers", Meta: "Stripe is hiring engineers", Text: "Stripe engineering and backend services roles."},
 	{URL: "https://vercel.com/careers", SourceType: "company_page", Title: "Vercel Careers", Meta: "Work on Vercel platform", Text: "Hiring backend, Go, and platform engineers."},
@@ -36,6 +37,7 @@ var seedCandidates = []candidateSource{
 	{URL: "https://builtin.com/jobs", SourceType: "job_board", Title: "BuiltIn tech jobs", Meta: "Tech job board", Text: "Tech job board with backend, Go, and cloud roles."},
 	{URL: "https://lever.co", SourceType: "job_board", Title: "Lever hosted boards", Meta: "Career platform", Text: "Job listings platform commonly used for careers pages."},
 	{URL: "https://greenhouse.io", SourceType: "job_board", Title: "Greenhouse job boards", Meta: "Career platform", Text: "Career boards for many startups and tech companies."},
+	{URL: "https://jobs.ashbyhq.com", SourceType: "job_board", Title: "Ashby job boards", Meta: "Job boards", Text: "Ashby-hosted job boards used by tech companies."},
 }
 
 func NewEngine(store *store.Store, classifier *core.ClassifierService) *Engine {
@@ -91,6 +93,10 @@ func (e *Engine) crawlForCareerLinks(ctx context.Context) {
 		"https://www.supabase.com",
 		"https://www.datadoghq.com",
 		"https://www.zendesk.com",
+		"https://jobs.ashbyhq.com",
+		"https://www.hashicorp.com",
+		"https://www.digitalocean.com",
+		"https://about.gitlab.com/careers/",
 	}
 
 	c := newCrawler()
@@ -116,9 +122,13 @@ func (e *Engine) searchWeb(ctx context.Context) {
 		"software engineer careers site:careers",
 		"backend jobs site:jobs",
 		"remote golang hiring",
+		"golang remote backend job board",
+		"senior golang engineer careers",
+		"golang developer jobs Europe remote",
 	}
 
 	seen := make(map[string]struct{})
+	c := newCrawler()
 	for _, q := range queries {
 		urls := duckDuckSearch(ctx, q, 15)
 		for _, u := range urls {
@@ -130,6 +140,19 @@ func (e *Engine) searchWeb(ctx context.Context) {
 				URL:        u,
 				SourceType: guessSourceType(u),
 			})
+
+			// Crawl the result page for career/job links and enqueue those too.
+			links := c.extractCareerLinks(ctx, u)
+			for _, link := range links {
+				if _, ok := seen[link]; ok {
+					continue
+				}
+				seen[link] = struct{}{}
+				e.processCandidate(ctx, candidateSource{
+					URL:        link,
+					SourceType: guessSourceType(link),
+				})
+			}
 		}
 	}
 }
@@ -174,64 +197,12 @@ func (e *Engine) processCandidate(ctx context.Context, c candidateSource) {
 				log.Printf("Discovery: source already exists %s (ID: %d)", c.URL, id)
 			} else {
 				log.Printf("Discovery: APPROVED source %s (ID: %d)", c.URL, id)
-				// Trigger job scraping for this new source (Mocked for now)
-				e.mockScrapeJobs(ctx, id, c)
+				// Scraping now handled by ingestion using site-specific scrapers
 			}
 		}
 	} else {
 		log.Printf("Discovery: REJECTED source %s (Confidence: %.2f)", c.URL, classification.Confidence)
 	}
-}
-
-func (e *Engine) mockScrapeJobs(ctx context.Context, sourceID int, c candidateSource) {
-	// Determine company name from URL
-	company := deriveCompanyName(c.URL)
-
-	// Mock Keyword Filtering
-	// In a real scraper, we would check the scraped description text.
-	// Here we simulate it by only "saving" if the mock data we generate contains keywords.
-	// For this demo, let's say "wikipedia" or "stackoverflow" don't match our tech stack
-
-	title := "Senior Software Engineer"
-	description := "We are hiring for " + company + ". Must know Golang and Backend systems."
-
-	// Simple keyword filter logic
-	if !core.MatchesKeywords(description+" "+title, []string{"go", "golang", "backend", "software engineer"}) {
-		log.Printf("Discovery: Filtered out job from %s due to keyword mismatch", company)
-		return
-	}
-
-	postDate := time.Now()
-	job := store.Job{
-		SourceID:     sourceID,
-		SourceURL:    c.URL,
-		SourceType:   c.SourceType,
-		URL:          c.URL + "/job/auto-1",
-		Title:        title,
-		Description:  description,
-		Company:      company,
-		Location:     "Remote",
-		MatchScore:   85,
-		MatchSummary: "Auto-matched by AI",
-		PostedAt:     &postDate,
-	}
-
-	if err := e.store.SaveJob(ctx, job); err != nil {
-		log.Printf("Failed to save mock job: %v", err)
-	} else {
-		log.Printf("Discovery: Scraped and saved job for %s", company)
-	}
-}
-
-func deriveCompanyName(url string) string {
-	trimmed := strings.TrimPrefix(url, "https://")
-	trimmed = strings.TrimPrefix(trimmed, "http://")
-	parts := strings.Split(trimmed, ".")
-	if len(parts) > 0 && parts[0] != "" {
-		name := parts[0]
-		return strings.ToUpper(name[:1]) + name[1:]
-	}
-	return "Unknown"
 }
 
 func guessSourceType(url string) string {

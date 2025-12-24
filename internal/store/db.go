@@ -51,10 +51,8 @@ func clampLimit(limit int, defaultLimit, maxLimit int) int {
 	if limit <= 0 {
 		return defaultLimit
 	}
-	if limit > maxLimit {
-		return maxLimit
-	}
-	return limit
+
+	return min(limit, maxLimit)
 }
 
 func normalizePagination(limit, offset int) (int, int) {
@@ -62,6 +60,7 @@ func normalizePagination(limit, offset int) (int, int) {
 	if offset < 0 {
 		offset = 0
 	}
+
 	return limit, offset
 }
 
@@ -69,6 +68,7 @@ func scanNullTime(nt sql.NullTime) *time.Time {
 	if !nt.Valid {
 		return nil
 	}
+
 	t := nt.Time
 	return &t
 }
@@ -100,6 +100,10 @@ type Job struct {
 	MatchSummary string     `json:"match_summary"`
 	Applied      bool       `json:"applied"`
 	AppliedAt    *time.Time `json:"applied_at,omitempty"`
+	Rejected     bool       `json:"rejected"`
+	RejectedAt   *time.Time `json:"rejected_at,omitempty"`
+	Closed       bool       `json:"closed"`
+	ClosedAt     *time.Time `json:"closed_at,omitempty"`
 	PostedAt     *time.Time `json:"posted_at,omitempty"`
 	CreatedAt    time.Time  `json:"created_at"`
 }
@@ -108,32 +112,55 @@ func (s *Store) GetJobs(ctx context.Context, limit, offset int) ([]Job, int, err
 	limit, offset = normalizePagination(limit, offset)
 
 	var total int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM jobs`).Scan(&total); err != nil {
+	if err := s.db.QueryRowContext(
+		ctx,
+		`SELECT 
+			COUNT(*) 
+		FROM 
+			jobs`,
+	).Scan(
+		&total,
+	); err != nil {
 		return nil, 0, err
 	}
 
-	rows, err := s.db.QueryContext(ctx, `
-SELECT 
-    j.id,
-    j.source_id,
-    s.url as source_url,
-    COALESCE(j.source_type, s.type) as source_type,
-    j.url,
-    j.title,
-    j.company,
-    j.location,
-    j.match_score,
-    j.match_summary,
-    j.applied,
-    j.applied_at,
-    j.posted_at,
-    j.description,
-    j.created_at
-FROM jobs j
-LEFT JOIN sources s ON s.id = j.source_id
-ORDER BY j.applied ASC, j.match_score DESC, COALESCE(j.posted_at, j.created_at) DESC
-LIMIT $1 OFFSET $2
-`, limit, offset)
+	rows, err := s.db.QueryContext(
+		ctx,
+		`SELECT 
+    		j.id,
+    		j.source_id,
+    		s.url as source_url,
+    		COALESCE(j.source_type, s.type) as source_type,
+    		j.url,
+    		j.title,
+    		j.company,
+    		j.location,
+    		j.match_score,
+    		j.match_summary,
+    		j.applied,
+    		j.applied_at,
+    		j.rejected,
+    		j.rejected_at,
+    		j.closed,
+    		j.closed_at,
+    		j.posted_at,
+    		j.description,
+    		j.created_at
+		FROM 
+			jobs j
+		LEFT JOIN 
+			sources s ON s.id = j.source_id
+		ORDER BY 
+			j.applied ASC, 
+			j.match_score DESC, 
+			COALESCE(j.posted_at, j.created_at) DESC
+		LIMIT 
+			$1 
+		OFFSET 
+			$2`,
+		limit,
+		offset,
+	)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -144,6 +171,8 @@ LIMIT $1 OFFSET $2
 		var (
 			j          Job
 			appliedAt  sql.NullTime
+			rejectedAt sql.NullTime
+			closedAt   sql.NullTime
 			postedAt   sql.NullTime
 			sourceURL  sql.NullString
 			sourceType sql.NullString
@@ -163,6 +192,10 @@ LIMIT $1 OFFSET $2
 			&j.MatchSummary,
 			&j.Applied,
 			&appliedAt,
+			&j.Rejected,
+			&rejectedAt,
+			&j.Closed,
+			&closedAt,
 			&postedAt,
 			&j.Description,
 			&createdAt,
@@ -173,10 +206,14 @@ LIMIT $1 OFFSET $2
 		if sourceURL.Valid {
 			j.SourceURL = sourceURL.String
 		}
+
 		if sourceType.Valid {
 			j.SourceType = sourceType.String
 		}
+
 		j.AppliedAt = scanNullTime(appliedAt)
+		j.RejectedAt = scanNullTime(rejectedAt)
+		j.ClosedAt = scanNullTime(closedAt)
 		j.PostedAt = scanNullTime(postedAt)
 		j.CreatedAt = createdAt
 
@@ -189,17 +226,44 @@ func (s *Store) ListSources(ctx context.Context, limit, offset int) ([]Source, i
 	limit, offset = normalizePagination(limit, offset)
 
 	var total int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sources WHERE is_job_site = TRUE`).Scan(&total); err != nil {
+	if err := s.db.QueryRowContext(
+		ctx,
+		`SELECT 
+			COUNT(*) 
+		FROM 
+			sources 
+		WHERE 
+			is_job_site = TRUE`,
+	).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, url, type, is_job_site, tech_related, confidence, last_checked_at, last_scraped_at, discovered_at, COALESCE(classification_reason, '')
-FROM sources
-WHERE is_job_site = TRUE
-ORDER BY last_scraped_at NULLS FIRST, last_checked_at NULLS FIRST
-LIMIT $1 OFFSET $2
-`, limit, offset)
+		SELECT 
+			id, 
+			url, 
+			type, 
+			is_job_site, 
+			tech_related, 
+			confidence, 
+			last_checked_at, 
+			last_scraped_at, 
+			discovered_at, 
+			COALESCE(classification_reason, '')
+		FROM 
+			sources
+		WHERE 
+			is_job_site = TRUE
+		ORDER BY 
+			last_scraped_at NULLS FIRST, 
+			last_checked_at NULLS FIRST
+		LIMIT 
+			$1 
+		OFFSET 
+			$2`,
+		limit,
+		offset,
+	)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -239,73 +303,231 @@ LIMIT $1 OFFSET $2
 	return sources, total, rows.Err()
 }
 
-func (s *Store) AddSource(ctx context.Context, url, sourceType string, isJobSite, techRelated bool, confidence float64, reason string) (id int, existed bool, err error) {
+func (s *Store) AddSource(
+	ctx context.Context,
+	url,
+	sourceType string,
+	isJobSite,
+	techRelated bool,
+	confidence float64,
+	reason string,
+) (
+	id int,
+	existed bool,
+	err error,
+) {
 	var existingID sql.NullInt64
-	if err = s.db.QueryRowContext(ctx, `SELECT id FROM sources WHERE url = $1`, url).Scan(&existingID); err != nil && err != sql.ErrNoRows {
+	if err = s.db.QueryRowContext(
+		ctx,
+		`SELECT 
+			id 
+		FROM 
+			sources 
+		WHERE 
+			url = $1`,
+		url,
+	).Scan(
+		&existingID,
+	); err != nil && err != sql.ErrNoRows {
 		return 0, false, err
 	}
+
 	if existingID.Valid {
 		existed = true
 	}
 
-	err = s.db.QueryRowContext(ctx, `
-INSERT INTO sources (url, type, is_job_site, tech_related, confidence, classification_reason, last_checked_at, discovered_at)
-VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
-ON CONFLICT (url) DO UPDATE SET
-    type = EXCLUDED.type,
-    is_job_site = EXCLUDED.is_job_site,
-    tech_related = EXCLUDED.tech_related,
-    confidence = EXCLUDED.confidence,
-    classification_reason = EXCLUDED.classification_reason,
-    last_checked_at = NOW()
-RETURNING id
-`, url, sourceType, isJobSite, techRelated, confidence, reason).Scan(&id)
+	err = s.db.QueryRowContext(
+		ctx,
+		`INSERT INTO
+    		sources (
+        		url,
+        		type,
+        		is_job_site,
+        		tech_related,
+        		confidence,
+        		classification_reason,
+        		last_checked_at,
+        		discovered_at
+    		)
+		VALUES
+    		(
+        		$1,
+        		$2,
+        		$3,
+        		$4,
+        		$5,
+        		$6,
+        		NOW(),
+        		NOW()
+    		) ON CONFLICT (url) DO
+		UPDATE
+		SET
+    	type = EXCLUDED.type,
+    	is_job_site = EXCLUDED.is_job_site,
+    	tech_related = EXCLUDED.tech_related,
+    	confidence = EXCLUDED.confidence,
+    	classification_reason = EXCLUDED.classification_reason,
+    	last_checked_at = NOW() RETURNING id;`,
+		url,
+		sourceType,
+		isJobSite,
+		techRelated,
+		confidence,
+		reason,
+	).Scan(&id)
 	return id, existed, err
 }
 
 func (s *Store) MarkSourceScraped(ctx context.Context, sourceID int) error {
-	_, err := s.db.ExecContext(ctx, `
-UPDATE sources
-SET last_scraped_at = NOW(), last_checked_at = NOW()
-WHERE id = $1
-`, sourceID)
+	_, err := s.db.ExecContext(
+		ctx,
+		`UPDATE 
+			sources
+		SET 
+			last_scraped_at = NOW(), 
+			last_checked_at = NOW()
+		WHERE 
+			id = $1`,
+		sourceID,
+	)
+
 	return err
 }
 
 func (s *Store) SaveJob(ctx context.Context, job Job) error {
-	_, err := s.db.ExecContext(ctx, `
-INSERT INTO jobs (source_id, source_type, url, title, description, company, location, posted_at, match_score, match_summary, applied, applied_at, created_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
-ON CONFLICT (url) DO UPDATE SET
-    source_id = EXCLUDED.source_id,
-    source_type = COALESCE(EXCLUDED.source_type, jobs.source_type),
-    title = EXCLUDED.title,
-    description = EXCLUDED.description,
-    company = EXCLUDED.company,
-    location = EXCLUDED.location,
-    posted_at = COALESCE(jobs.posted_at, EXCLUDED.posted_at),
-    match_score = EXCLUDED.match_score,
-    match_summary = EXCLUDED.match_summary,
-    updated_at = NOW()
-`, job.SourceID, job.SourceType, job.URL, job.Title, job.Description, job.Company, job.Location, job.PostedAt, job.MatchScore, job.MatchSummary, job.Applied, job.AppliedAt)
+	_, err := s.db.ExecContext(
+		ctx,
+		`INSERT INTO
+		    jobs (
+		        source_id,
+		        source_type,
+		        url,
+		        title,
+		        description,
+		        company,
+		        location,
+		        posted_at,
+		        match_score,
+		        match_summary,
+		        applied,
+		        applied_at,
+		        rejected,
+		        rejected_at,
+		        closed,
+		        closed_at,
+		        created_at
+		    )
+		VALUES
+		    (
+		        $1,
+		        $2,
+		        $3,
+		        $4,
+		        $5,
+		        $6,
+		        $7,
+		        $8,
+		        $9,
+		        $10,
+		        $11,
+		        $12,
+		        $13,
+		        $14,
+		        $15,
+		        $16,
+		        NOW()
+		    ) ON CONFLICT (url) DO
+		UPDATE
+		SET
+		    source_id = EXCLUDED.source_id,
+		    source_type = COALESCE(EXCLUDED.source_type, jobs.source_type),
+		    title = EXCLUDED.title,
+		    description = EXCLUDED.description,
+		    company = EXCLUDED.company,
+		    location = EXCLUDED.location,
+		    posted_at = COALESCE(jobs.posted_at, EXCLUDED.posted_at),
+		    match_score = EXCLUDED.match_score,
+		    match_summary = EXCLUDED.match_summary,
+		    updated_at = NOW()`,
+		job.SourceID,
+		job.SourceType,
+		job.URL,
+		job.Title,
+		job.Description,
+		job.Company,
+		job.Location,
+		job.PostedAt,
+		job.MatchScore,
+		job.MatchSummary,
+		job.Applied,
+		job.AppliedAt,
+		job.Rejected,
+		job.RejectedAt,
+		job.Closed,
+		job.ClosedAt,
+	)
 	return err
 }
 
 func (s *Store) MarkJobApplied(ctx context.Context, jobID int) error {
-	_, err := s.db.ExecContext(ctx, `
-UPDATE jobs
-SET applied = TRUE, applied_at = NOW(), updated_at = NOW()
-WHERE id = $1
-`, jobID)
+	_, err := s.db.ExecContext(
+		ctx,
+		`UPDATE 
+			jobs
+		SET 
+			applied = TRUE, 
+			applied_at = NOW(),
+			updated_at = NOW()
+		WHERE 
+			id = $1`,
+		jobID,
+	)
+	return err
+}
+
+func (s *Store) MarkJobRejected(ctx context.Context, jobID int) error {
+	_, err := s.db.ExecContext(
+		ctx, 
+		`UPDATE 
+			jobs
+		SET 
+			rejected = TRUE, 
+			rejected_at = NOW(), 
+			updated_at = NOW()
+		WHERE 
+			id = $1`,
+		jobID,
+	)
+	return err
+}
+
+func (s *Store) MarkJobClosed(ctx context.Context, jobID int) error {
+	_, err := s.db.ExecContext(
+		ctx,
+		`UPDATE 
+			jobs
+		SET 
+			closed = TRUE, 
+			closed_at = NOW(), 
+			updated_at = NOW()
+		WHERE 
+			id = $1`,
+		jobID,
+	)
 	return err
 }
 
 func (s *Store) DeleteOldJobs(ctx context.Context, olderThan time.Duration) (int64, error) {
 	cutoff := time.Now().Add(-olderThan)
-	res, err := s.db.ExecContext(ctx, `
-DELETE FROM jobs
-WHERE COALESCE(posted_at, created_at) < $1
-`, cutoff)
+	
+	res, err := s.db.ExecContext(
+		ctx,
+		`DELETE FROM 
+			jobs
+		WHERE 
+			COALESCE(posted_at, created_at) < $1`,
+		cutoff,
+	)
 	if err != nil {
 		return 0, err
 	}

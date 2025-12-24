@@ -17,6 +17,7 @@ type IngestionService struct {
 	matcher    *MatcherService
 	normalizer scraper.Normalizer
 	keywords   []string
+	blockedLoc []string
 	profile    ai.CandidateProfile
 }
 
@@ -26,6 +27,7 @@ func NewIngestionService(store *store.Store, matcher *MatcherService) *Ingestion
 		matcher:    matcher,
 		normalizer: scraper.NewSimpleNormalizer(),
 		keywords:   []string{"golang", "go developer", "backend", "microservices", "grpc", "distributed systems", "software engineer"},
+		blockedLoc: []string{"india", "delhi", "mumbai", "bangalore", "bengaluru", "korea", "south korea", "seoul", "japan", "tokyo", "china", "beijing", "shanghai"},
 		profile: ai.CandidateProfile{
 			TechStack: []string{"golang", "backend", "grpc", "rest", "postgresql", "redis", "docker", "linux"},
 		},
@@ -88,6 +90,10 @@ func (s *IngestionService) scrapeOnce(ctx context.Context) {
 			desc := raw.Description
 			if normalized, err := s.normalizer.Normalize(raw.Description); err == nil && normalized != "" {
 				desc = normalized
+			}
+
+			if s.isBlockedLocation(raw.Location) {
+				continue
 			}
 
 			finalScore, summary := s.scoreJob(ctx, raw.Title, desc)
@@ -184,6 +190,19 @@ func (s *IngestionService) ruleScore(text string) int {
 	default:
 		return 0
 	}
+}
+
+func (s *IngestionService) isBlockedLocation(loc string) bool {
+	if loc == "" {
+		return false
+	}
+	l := strings.ToLower(loc)
+	for _, b := range s.blockedLoc {
+		if strings.Contains(l, b) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *IngestionService) pickScraper(rawURL, sourceType string) scraper.JobScraper {
