@@ -29,12 +29,16 @@ type candidateSource struct {
 	Title      string `json:"title"`
 	Meta       string `json:"meta"`
 	Text       string `json:"text"`
+	ParentURL  string `json:"parent_url,omitempty"`
+	Depth      int    `json:"depth,omitempty"`
 }
 
 //go:embed seeds.json
 var seedsJSON []byte
 
 var seedCandidates = loadSeedCandidates()
+
+const maxCandidateDepth = 2
 
 func loadSeedCandidates() []candidateSource {
 	var seeds []candidateSource
@@ -113,10 +117,21 @@ func (e *Engine) crawlForCareerLinks(ctx context.Context) {
 		default:
 		}
 		links := c.extractCareerLinks(ctx, site)
+		if containsATS(links) {
+			if normalized, host, err := urlutil.Normalize(site); err == nil && host != "" && !urlutil.IsATSHost(host) {
+				if err := e.store.MarkHostATSBacked(ctx, host); err != nil {
+					observability.IncError(observability.ErrorStore, "discovery")
+					slog.Error("discovery ATS-backed mark failed", "url", normalized, "error", err)
+				}
+				_, _, _ = e.store.AddSource(ctx, normalized, guessSourceType(normalized), urlutil.PageTypeNonJobHighConfidence, false, "", false, false, 0.9, "ats_link", true)
+			}
+		}
 		for _, link := range links {
 			e.processCandidate(ctx, candidateSource{
 				URL:        link,
 				SourceType: guessSourceType(link),
+				ParentURL:  site,
+				Depth:      1,
 			})
 		}
 	}
@@ -146,6 +161,15 @@ func (e *Engine) searchWeb(ctx context.Context) {
 			// Crawl the result page for career/job links and enqueue those too.
 			links := c.extractCareerLinks(ctx, u)
 			atsOnly := containsATS(links)
+			if atsOnly {
+				if normalized, host, err := urlutil.Normalize(u); err == nil && host != "" && !urlutil.IsATSHost(host) {
+					if err := e.store.MarkHostATSBacked(ctx, host); err != nil {
+						observability.IncError(observability.ErrorStore, "discovery")
+						slog.Error("discovery ATS-backed mark failed", "url", normalized, "error", err)
+					}
+					_, _, _ = e.store.AddSource(ctx, normalized, guessSourceType(normalized), urlutil.PageTypeNonJobHighConfidence, false, "", false, false, 0.9, "ats_link", true)
+				}
+			}
 			if !atsOnly && urlutil.IsDiscoveryEligible(u) {
 				e.processCandidate(ctx, candidateSource{
 					URL:        u,
@@ -160,6 +184,8 @@ func (e *Engine) searchWeb(ctx context.Context) {
 				e.processCandidate(ctx, candidateSource{
 					URL:        link,
 					SourceType: guessSourceType(link),
+					ParentURL:  u,
+					Depth:      1,
 				})
 			}
 		}
@@ -182,6 +208,16 @@ func (e *Engine) processCandidate(ctx context.Context, c candidateSource) {
 		slog.Info("discovery skip", "url", normalized, "reason", "ineligible")
 		return
 	}
+	if !urlutil.IsATSHost(host) {
+		atsBacked, err := e.store.IsHostATSBacked(ctx, host)
+		if err != nil {
+			observability.IncError(observability.ErrorStore, "discovery")
+			slog.Error("discovery ATS-backed check failed", "url", normalized, "error", err)
+		} else if atsBacked {
+			slog.Info("discovery skip", "url", normalized, "reason", "ats_backed")
+			return
+		}
+	}
 	observability.IncURLsDiscovered("discovery")
 
 	sourceType := c.SourceType
@@ -196,17 +232,22 @@ func (e *Engine) processCandidate(ctx context.Context, c candidateSource) {
 		slog.Error("discovery lookup failed", "url", normalized, "error", err)
 		return
 	}
+	retryAttempt := false
 	if existing != nil && existing.PageType != urlutil.PageTypeCandidate && !forcedJobBoard {
 		reason := "already_processed"
 		if existing.IsAlias {
 			reason = "alias"
-		} else if existing.PageType == urlutil.PageTypeNonJob ||
-			existing.PageType == urlutil.PageTypeJobDetail ||
-			existing.PageType == urlutil.PageTypeNonJobPermanent {
+		} else if isRetryableNonJob(existing) {
+			retryAttempt = true
+		} else if isFinalNonJob(existing.PageType) {
+			reason = "non_job"
+		} else if existing.PageType == urlutil.PageTypeJobDetail {
 			reason = "non_job"
 		}
-		slog.Info("discovery skip", "url", normalized, "reason", reason, "page_type", existing.PageType)
-		return
+		if !retryAttempt {
+			slog.Info("discovery skip", "url", normalized, "reason", reason, "page_type", existing.PageType)
+			return
+		}
 	}
 
 	if forcedJobBoard {
@@ -252,14 +293,7 @@ func (e *Engine) processCandidate(ctx context.Context, c candidateSource) {
 	}
 
 	if urlutil.IsATSHost(host) {
-		pageType := urlutil.DetectPageType(normalized)
-		if pageType == urlutil.PageTypeNonJob {
-			_, _, _ = e.store.AddSource(ctx, normalized, sourceType, urlutil.PageTypeNonJob, false, "", false, false, 0, "ats_root", false)
-			slog.Info("discovery skip", "url", normalized, "reason", "ats_root")
-			return
-		}
-
-		pageType = urlutil.PageTypeJobList
+		pageType := urlutil.PageTypeJobList
 		canonicalURL, isAlias, err := e.store.ResolveCanonicalSource(ctx, normalized, host, pageType)
 		if err != nil {
 			observability.IncError(observability.ErrorStore, "discovery")
@@ -327,12 +361,16 @@ func (e *Engine) processCandidate(ctx context.Context, c candidateSource) {
 	if len(signals.ATSLinks) > 0 {
 		observability.IncATSDetected("discovery")
 		e.addATSSources(ctx, signals.ATSLinks)
+		if err := e.store.MarkHostATSBacked(ctx, host); err != nil {
+			observability.IncError(observability.ErrorStore, "discovery")
+			slog.Error("discovery ATS-backed mark failed", "url", normalized, "error", err)
+		}
 		observability.IncSourceDecision("rejected")
 		_, _, _ = e.store.AddSource(
 			ctx,
 			normalized,
 			sourceType,
-			urlutil.PageTypeNonJob,
+			urlutil.PageTypeNonJobHighConfidence,
 			false,
 			"",
 			false,
@@ -347,21 +385,40 @@ func (e *Engine) processCandidate(ctx context.Context, c candidateSource) {
 
 	decision := content.Classify(signals)
 	if decision.PageType == urlutil.PageTypeNonJob {
+		pageType := urlutil.PageTypeNonJobLowConfidence
+		reason := decision.Reason
+		if retryAttempt {
+			pageType = urlutil.PageTypeNonJobHighConfidence
+			reason = decision.Reason + "_retry"
+			if existing != nil {
+				if err := e.store.IncrementSourceRecheck(ctx, existing.ID); err != nil {
+					observability.IncError(observability.ErrorStore, "discovery")
+					slog.Error("discovery recheck increment failed", "source_id", existing.ID, "error", err)
+				}
+			}
+		}
 		observability.IncSourceDecision("rejected")
 		_, _, _ = e.store.AddSource(
 			ctx,
 			normalized,
 			sourceType,
-			urlutil.PageTypeNonJob,
+			pageType,
 			false,
 			"",
 			false,
 			false,
 			decision.Confidence,
-			decision.Reason,
+			reason,
 			false,
 		)
-		slog.Info("discovery skip", "url", normalized, "reason", "non_job", "classification", decision.Reason)
+		slog.Info("discovery skip", "url", normalized, "reason", "non_job", "classification", reason)
+		if pageType == urlutil.PageTypeNonJobLowConfidence {
+			e.discoverChildCandidates(ctx, candidateSource{
+				URL:       normalized,
+				Depth:     c.Depth,
+				ParentURL: c.ParentURL,
+			})
+		}
 		return
 	}
 
@@ -374,6 +431,7 @@ func (e *Engine) processCandidate(ctx context.Context, c candidateSource) {
 	if isAlias {
 		_, _, _ = e.store.AddSource(ctx, normalized, sourceType, decision.PageType, true, canonicalURL, false, false, 0, "alias", false)
 		slog.Info("discovery skip", "url", normalized, "reason", "alias", "canonical", canonicalURL)
+		e.promoteParent(ctx, c.ParentURL, "child_"+decision.Reason, decision.Confidence)
 		return
 	}
 
@@ -402,6 +460,7 @@ func (e *Engine) processCandidate(ctx context.Context, c candidateSource) {
 		return
 	}
 	slog.Info("discovery source approved", "url", normalized, "id", id)
+	e.promoteParent(ctx, c.ParentURL, "child_"+decision.Reason, decision.Confidence)
 	// Scraping now handled by ingestion using site-specific scrapers.
 }
 
@@ -436,6 +495,72 @@ func (e *Engine) addATSSources(ctx context.Context, links []string) {
 			observability.IncError(observability.ErrorStore, "discovery")
 			slog.Error("discovery store ATS source failed", "url", normalized, "error", err)
 		}
+	}
+}
+
+func (e *Engine) discoverChildCandidates(ctx context.Context, parent candidateSource) {
+	if parent.URL == "" || parent.Depth >= maxCandidateDepth {
+		return
+	}
+	c := newCrawler()
+	links, _ := c.collectLinksFromPage(ctx, parent.URL)
+	for _, link := range links {
+		if link == "" || link == parent.URL {
+			continue
+		}
+		e.processCandidate(ctx, candidateSource{
+			URL:        link,
+			SourceType: guessSourceType(link),
+			ParentURL:  parent.URL,
+			Depth:      parent.Depth + 1,
+		})
+	}
+}
+
+func (e *Engine) promoteParent(ctx context.Context, parentURL, reason string, confidence float64) {
+	if parentURL == "" {
+		return
+	}
+	normalized, host, err := urlutil.Normalize(parentURL)
+	if err != nil || host == "" {
+		return
+	}
+	if urlutil.IsATSHost(host) {
+		return
+	}
+	atsBacked, err := e.store.IsHostATSBacked(ctx, host)
+	if err != nil {
+		observability.IncError(observability.ErrorStore, "discovery")
+		slog.Error("discovery ATS-backed check failed", "url", normalized, "error", err)
+		return
+	}
+	if atsBacked {
+		return
+	}
+	if reason == "" {
+		reason = "child_signal"
+	}
+	if confidence < 0.6 {
+		confidence = 0.6
+	}
+
+	pageType := urlutil.PageTypeCareerRoot
+	canonicalURL, isAlias, err := e.store.ResolveCanonicalSource(ctx, normalized, host, pageType)
+	if err != nil {
+		observability.IncError(observability.ErrorStore, "discovery")
+		slog.Error("discovery canonical resolve failed", "url", normalized, "error", err)
+		return
+	}
+	if isAlias {
+		_, _, _ = e.store.AddSource(ctx, normalized, guessSourceType(normalized), pageType, true, canonicalURL, false, false, 0, "alias", false)
+		return
+	}
+
+	observability.IncSourceDecision("accepted")
+	observability.IncSourcesPromoted("discovery")
+	if _, _, err := e.store.AddSource(ctx, normalized, guessSourceType(normalized), pageType, false, "", true, true, confidence, reason, false); err != nil {
+		observability.IncError(observability.ErrorStore, "discovery")
+		slog.Error("discovery store parent promotion failed", "url", normalized, "error", err)
 	}
 }
 
@@ -488,4 +613,28 @@ func containsATS(links []string) bool {
 		}
 	}
 	return false
+}
+
+func isRetryableNonJob(src *store.Source) bool {
+	if src == nil {
+		return false
+	}
+	switch src.PageType {
+	case urlutil.PageTypeNonJob, urlutil.PageTypeNonJobLowConfidence:
+		return src.RecheckCount < 1
+	default:
+		return false
+	}
+}
+
+func isFinalNonJob(pageType string) bool {
+	switch pageType {
+	case urlutil.PageTypeNonJob,
+		urlutil.PageTypeNonJobLowConfidence,
+		urlutil.PageTypeNonJobHighConfidence,
+		urlutil.PageTypeNonJobPermanent:
+		return true
+	default:
+		return false
+	}
 }

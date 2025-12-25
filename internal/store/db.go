@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	_ "github.com/lib/pq"
@@ -266,7 +267,8 @@ func (s *Store) ListSources(ctx context.Context, limit, offset int) ([]Source, i
 		WHERE 
 			is_job_site = TRUE
 			AND is_alias = FALSE
-			AND page_type IN ('career_root', 'job_list')`,
+			AND page_type IN ('career_root', 'job_list')
+			AND COALESCE(ats_backed, FALSE) = FALSE`,
 	).Scan(&total); err != nil {
 		return nil, 0, err
 	}
@@ -299,6 +301,7 @@ func (s *Store) ListSources(ctx context.Context, limit, offset int) ([]Source, i
 			is_job_site = TRUE
 			AND is_alias = FALSE
 			AND page_type IN ('career_root', 'job_list')
+			AND COALESCE(ats_backed, FALSE) = FALSE
 		ORDER BY 
 			last_scraped_at NULLS FIRST, 
 			last_checked_at NULLS FIRST
@@ -423,6 +426,7 @@ func (s *Store) AddSource(
 				confidence = $10,
 				classification_reason = $11,
 				ats_backed = $12,
+				recheck_count = CASE WHEN $8 THEN 0 ELSE COALESCE(recheck_count, 0) END,
 				last_checked_at = NOW()
 			WHERE
 				id = $13`,
@@ -523,6 +527,41 @@ func (s *Store) IncrementSourceRecheck(ctx context.Context, sourceID int) error 
 		WHERE
 			id = $1`,
 		sourceID,
+	)
+	return err
+}
+
+func (s *Store) IsHostATSBacked(ctx context.Context, host string) (bool, error) {
+	if strings.TrimSpace(host) == "" {
+		return false, nil
+	}
+	var exists bool
+	if err := s.db.QueryRowContext(
+		ctx,
+		`SELECT EXISTS(
+			SELECT 1 FROM sources WHERE host = $1 AND ats_backed = TRUE
+		)`,
+		host,
+	).Scan(&exists); err != nil {
+		return false, err
+	}
+	return exists, nil
+}
+
+func (s *Store) MarkHostATSBacked(ctx context.Context, host string) error {
+	if strings.TrimSpace(host) == "" {
+		return nil
+	}
+	_, err := s.db.ExecContext(
+		ctx,
+		`UPDATE
+			sources
+		SET
+			ats_backed = TRUE,
+			last_checked_at = NOW()
+		WHERE
+			host = $1`,
+		host,
 	)
 	return err
 }
@@ -862,7 +901,7 @@ func (s *Store) DeleteOldJobs(ctx context.Context, olderThan time.Duration) (int
 func (s *Store) GetStatsCounts(ctx context.Context) (sourcesTotal, jobsTotal, activeJobs int, err error) {
 	if err = s.db.QueryRowContext(
 		ctx,
-		`SELECT COUNT(*) FROM sources WHERE is_job_site = TRUE AND is_alias = FALSE AND page_type IN ('career_root', 'job_list')`,
+		`SELECT COUNT(*) FROM sources WHERE is_job_site = TRUE AND is_alias = FALSE AND page_type IN ('career_root', 'job_list') AND COALESCE(ats_backed, FALSE) = FALSE`,
 	).Scan(&sourcesTotal); err != nil {
 		return 0, 0, 0, err
 	}
@@ -948,17 +987,29 @@ func (s *Store) ListStatsHistory(ctx context.Context, metric string, limit, offs
 	var total int
 	if err := s.db.QueryRowContext(
 		ctx,
-		`SELECT COUNT(*) FROM stats_snapshots`,
+		`SELECT 
+			COUNT(*) 
+		FROM 
+			stats_snapshots`,
 	).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 
 	query := fmt.Sprintf(
-		`SELECT created_at, COALESCE(%s::double precision, 0)
-		FROM stats_snapshots
-		ORDER BY created_at DESC
-		LIMIT $1 OFFSET $2`, column,
+		`SELECT 
+			created_at, 
+			COALESCE(%s::double precision, 0)
+		FROM 
+			stats_snapshots
+		ORDER BY 
+			created_at DESC
+		LIMIT 
+			$1 
+		OFFSET 
+			$2`,
+		column,
 	)
+
 	rows, err := s.db.QueryContext(ctx, query, limit, offset)
 	if err != nil {
 		return nil, 0, err
@@ -968,14 +1019,20 @@ func (s *Store) ListStatsHistory(ctx context.Context, metric string, limit, offs
 	var points []StatPoint
 	for rows.Next() {
 		var point StatPoint
-		if err := rows.Scan(&point.CreatedAt, &point.Value); err != nil {
+
+		if err := rows.Scan(
+			&point.CreatedAt,
+			&point.Value,
+		); err != nil {
 			return nil, 0, err
 		}
+
 		points = append(points, point)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, 0, err
 	}
+
 	return points, total, nil
 }
 

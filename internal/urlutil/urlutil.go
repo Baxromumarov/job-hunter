@@ -8,12 +8,14 @@ import (
 )
 
 const (
-	PageTypeCandidate       = "candidate"
-	PageTypeCareerRoot      = "career_root"
-	PageTypeJobList         = "job_list"
-	PageTypeJobDetail       = "job_detail"
-	PageTypeNonJob          = "non_job"
-	PageTypeNonJobPermanent = "non_job_permanent"
+	PageTypeCandidate            = "candidate"
+	PageTypeCareerRoot           = "career_root"
+	PageTypeJobList              = "job_list"
+	PageTypeJobDetail            = "job_detail"
+	PageTypeNonJob               = "non_job"
+	PageTypeNonJobLowConfidence  = "non_job_low_confidence"
+	PageTypeNonJobHighConfidence = "non_job_high_confidence"
+	PageTypeNonJobPermanent      = "non_job_permanent"
 )
 
 const maxDiscoveryDepth = 6

@@ -30,7 +30,7 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	if jobs == nil {
 		jobs = []store.Job{}
 	}
-	respondJSON(w, http.StatusOK, map[string]interface{}{
+	respondJSON(w, http.StatusOK, map[string]any{
 		"items":        jobs,
 		"limit":        limit,
 		"offset":       offset,
@@ -50,7 +50,7 @@ func (s *Server) handleListSources(w http.ResponseWriter, r *http.Request) {
 	if sources == nil {
 		sources = []store.Source{}
 	}
-	respondJSON(w, http.StatusOK, map[string]interface{}{
+	respondJSON(w, http.StatusOK, map[string]any{
 		"items":  sources,
 		"limit":  limit,
 		"offset": offset,
@@ -112,12 +112,12 @@ func (s *Server) handleAddSource(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !urlutil.IsDiscoveryEligible(normalized) {
-		_, existed, err := s.store.AddSource(r.Context(), normalized, req.SourceType, urlutil.PageTypeNonJob, false, "", false, false, 0, "ineligible_url", false)
+		_, existed, err := s.store.AddSource(r.Context(), normalized, req.SourceType, urlutil.PageTypeNonJobHighConfidence, false, "", false, false, 0, "ineligible_url", false)
 		if err != nil {
 			respondError(w, http.StatusInternalServerError, "Failed to save source: "+err.Error())
 			return
 		}
-		respondJSON(w, http.StatusOK, map[string]interface{}{
+		respondJSON(w, http.StatusOK, map[string]any{
 			"is_job_site":  false,
 			"tech_related": false,
 			"confidence":   0.0,
@@ -139,7 +139,7 @@ func (s *Server) handleAddSource(w http.ResponseWriter, r *http.Request) {
 				respondError(w, http.StatusInternalServerError, "Failed to save source: "+err.Error())
 				return
 			}
-			respondJSON(w, http.StatusOK, map[string]interface{}{
+			respondJSON(w, http.StatusOK, map[string]any{
 				"is_job_site":  false,
 				"tech_related": false,
 				"confidence":   0.0,
@@ -166,7 +166,7 @@ func (s *Server) handleAddSource(w http.ResponseWriter, r *http.Request) {
 			respondError(w, http.StatusInternalServerError, "Failed to save source: "+err.Error())
 			return
 		}
-		respondJSON(w, http.StatusOK, map[string]interface{}{
+		respondJSON(w, http.StatusOK, map[string]any{
 			"is_job_site":  true,
 			"tech_related": true,
 			"confidence":   0.9,
@@ -181,23 +181,6 @@ func (s *Server) handleAddSource(w http.ResponseWriter, r *http.Request) {
 			normalized = atsURL
 			host = atsHost
 		}
-		pageType := urlutil.DetectPageType(normalized)
-		if pageType == urlutil.PageTypeNonJob {
-			_, existed, err := s.store.AddSource(r.Context(), normalized, req.SourceType, urlutil.PageTypeNonJob, false, "", false, false, 0, "ats_root", false)
-			if err != nil {
-				respondError(w, http.StatusInternalServerError, "Failed to save source: "+err.Error())
-				return
-			}
-			respondJSON(w, http.StatusOK, map[string]interface{}{
-				"is_job_site":  false,
-				"tech_related": false,
-				"confidence":   0.0,
-				"reason":       "ATS root URL",
-				"existed":      existed,
-			})
-			return
-		}
-
 		canonicalURL, isAlias, err := s.store.ResolveCanonicalSource(r.Context(), normalized, host, urlutil.PageTypeJobList)
 		if err != nil {
 			respondError(w, http.StatusInternalServerError, "Failed to resolve canonical source: "+err.Error())
@@ -209,7 +192,7 @@ func (s *Server) handleAddSource(w http.ResponseWriter, r *http.Request) {
 				respondError(w, http.StatusInternalServerError, "Failed to save source: "+err.Error())
 				return
 			}
-			respondJSON(w, http.StatusOK, map[string]interface{}{
+			respondJSON(w, http.StatusOK, map[string]any{
 				"is_job_site":  false,
 				"tech_related": false,
 				"confidence":   0.0,
@@ -236,7 +219,7 @@ func (s *Server) handleAddSource(w http.ResponseWriter, r *http.Request) {
 			respondError(w, http.StatusInternalServerError, "Failed to save source: "+err.Error())
 			return
 		}
-		respondJSON(w, http.StatusOK, map[string]interface{}{
+		respondJSON(w, http.StatusOK, map[string]any{
 			"is_job_site":  true,
 			"tech_related": true,
 			"confidence":   0.9,
@@ -274,9 +257,14 @@ func (s *Server) handleAddSource(w http.ResponseWriter, r *http.Request) {
 	if len(signals.ATSLinks) > 0 {
 		observability.IncATSDetected("api")
 		addATSSources(r.Context(), s.store, signals.ATSLinks)
-		_, _, _ = s.store.AddSource(r.Context(), normalized, req.SourceType, urlutil.PageTypeNonJob, false, "", false, false, 0.9, "ats_link", true)
-		respondJSON(w, http.StatusOK, map[string]interface{}{
-			"is_job_site":  true,
+		if !urlutil.IsATSHost(host) {
+			if err := s.store.MarkHostATSBacked(r.Context(), host); err != nil {
+				observability.IncError(observability.ErrorStore, "api")
+			}
+		}
+		_, _, _ = s.store.AddSource(r.Context(), normalized, req.SourceType, urlutil.PageTypeNonJobHighConfidence, false, "", false, false, 0.9, "ats_link", true)
+		respondJSON(w, http.StatusOK, map[string]any{
+			"is_job_site":  false,
 			"tech_related": true,
 			"confidence":   0.9,
 			"reason":       "ats_link",
@@ -287,8 +275,8 @@ func (s *Server) handleAddSource(w http.ResponseWriter, r *http.Request) {
 
 	decision := content.Classify(signals)
 	if decision.PageType == urlutil.PageTypeNonJob {
-		_, _, _ = s.store.AddSource(r.Context(), normalized, req.SourceType, urlutil.PageTypeNonJob, false, "", false, false, decision.Confidence, decision.Reason, false)
-		respondJSON(w, http.StatusOK, map[string]interface{}{
+		_, _, _ = s.store.AddSource(r.Context(), normalized, req.SourceType, urlutil.PageTypeNonJobLowConfidence, false, "", false, false, decision.Confidence, decision.Reason, false)
+		respondJSON(w, http.StatusOK, map[string]any{
 			"is_job_site":  false,
 			"tech_related": false,
 			"confidence":   decision.Confidence,
@@ -310,7 +298,7 @@ func (s *Server) handleAddSource(w http.ResponseWriter, r *http.Request) {
 			respondError(w, http.StatusInternalServerError, "Failed to save source: "+err.Error())
 			return
 		}
-		respondJSON(w, http.StatusOK, map[string]interface{}{
+		respondJSON(w, http.StatusOK, map[string]any{
 			"is_job_site":  false,
 			"tech_related": false,
 			"confidence":   0.0,
@@ -338,7 +326,7 @@ func (s *Server) handleAddSource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	respondJSON(w, http.StatusOK, map[string]interface{}{
+	respondJSON(w, http.StatusOK, map[string]any{
 		"is_job_site":  true,
 		"tech_related": true,
 		"confidence":   decision.Confidence,
@@ -386,7 +374,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	if err := s.store.SaveStatsSnapshot(r.Context(), snapshot, sourcesTotal, jobsTotal, activeJobs); err != nil {
 		slog.Error("stats snapshot save failed", "error", err)
 	}
-	respondJSON(w, http.StatusOK, map[string]interface{}{
+	respondJSON(w, http.StatusOK, map[string]any{
 		"pages_crawled":     snapshot.PagesCrawled,
 		"jobs_discovered":   snapshot.JobsDiscovered,
 		"jobs_extracted":    snapshot.JobsExtracted,
@@ -425,7 +413,7 @@ func (s *Server) handleStatsHistory(w http.ResponseWriter, r *http.Request) {
 		items = []store.StatPoint{}
 	}
 
-	respondJSON(w, http.StatusOK, map[string]interface{}{
+	respondJSON(w, http.StatusOK, map[string]any{
 		"metric": metric,
 		"items":  items,
 		"limit":  limit,

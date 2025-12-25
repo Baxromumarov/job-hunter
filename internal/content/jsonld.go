@@ -10,27 +10,27 @@ func hasJobPostingJSONLD(raw string) bool {
 	if raw == "" {
 		return false
 	}
-	var payload interface{}
+	var payload any
 	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
 		return false
 	}
 	return containsJobPosting(payload)
 }
 
-func containsJobPosting(payload interface{}) bool {
+func containsJobPosting(payload any) bool {
 	switch t := payload.(type) {
-	case map[string]interface{}:
+	case map[string]any:
 		if isJobPostingType(t["@type"]) {
 			return true
 		}
-		if graph, ok := t["@graph"].([]interface{}); ok {
+		if graph, ok := t["@graph"].([]any); ok {
 			for _, item := range graph {
 				if containsJobPosting(item) {
 					return true
 				}
 			}
 		}
-	case []interface{}:
+	case []any:
 		for _, item := range t {
 			if containsJobPosting(item) {
 				return true
@@ -40,11 +40,11 @@ func containsJobPosting(payload interface{}) bool {
 	return false
 }
 
-func isJobPostingType(t interface{}) bool {
+func isJobPostingType(t any) bool {
 	switch v := t.(type) {
 	case string:
 		return v == "JobPosting"
-	case []interface{}:
+	case []any:
 		for _, item := range v {
 			if s, ok := item.(string); ok && s == "JobPosting" {
 				return true

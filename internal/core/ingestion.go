@@ -377,6 +377,12 @@ func (s *IngestionService) retrySource(ctx context.Context, src store.Source, sc
 	if len(signals.ATSLinks) > 0 {
 		observability.IncATSDetected("ingestion")
 		s.addATSSources(ctx, signals.ATSLinks)
+		if normalized, host, err := urlutil.Normalize(src.URL); err == nil && host != "" && !urlutil.IsATSHost(host) {
+			if err := s.store.MarkHostATSBacked(ctx, host); err != nil {
+				observability.IncError(observability.ErrorStore, "ingestion")
+				slog.Error("ingestion ATS-backed mark failed", "url", normalized, "error", err)
+			}
+		}
 		s.markSourceNonJobPermanent(ctx, src, "ats_link", true)
 		return nil, true
 	}
