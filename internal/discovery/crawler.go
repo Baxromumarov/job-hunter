@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/xml"
+	"errors"
 	"net/http"
 	"net/url"
 	"path"
@@ -62,7 +63,7 @@ func (c *crawler) extractCareerLinks(ctx context.Context, rawURL string) []strin
 		atsOut = append(atsOut, u)
 	}
 
-	links, atsLinks := c.collectLinksFromPage(ctx, rawURL)
+	links, atsLinks, rateLimited := c.collectLinksFromPage(ctx, rawURL)
 	if len(atsLinks) > 0 {
 		for _, link := range atsLinks {
 			addATS(link)
@@ -72,13 +73,22 @@ func (c *crawler) extractCareerLinks(ctx context.Context, rawURL string) []strin
 	for _, link := range links {
 		add(link)
 	}
+	if rateLimited {
+		return out
+	}
+	if urlutil.IsATSHost(base.Hostname()) {
+		return out
+	}
 
 	for _, probe := range probePaths(base) {
 		if _, ok := seen[probe]; ok {
 			continue
 		}
+		links, atsLinks, rateLimited = c.collectLinksFromPage(ctx, probe)
+		if rateLimited {
+			return out
+		}
 		add(probe)
-		links, atsLinks = c.collectLinksFromPage(ctx, probe)
 		if len(atsLinks) > 0 {
 			for _, link := range atsLinks {
 				addATS(link)
@@ -104,10 +114,10 @@ func (c *crawler) extractCareerLinks(ctx context.Context, rawURL string) []strin
 	return out
 }
 
-func (c *crawler) collectLinksFromPage(ctx context.Context, target string) ([]string, []string) {
+func (c *crawler) collectLinksFromPage(ctx context.Context, target string) ([]string, []string, bool) {
 	pageBase, err := url.Parse(target)
 	if err != nil {
-		return nil, nil
+		return nil, nil, false
 	}
 
 	seen := make(map[string]struct{})
@@ -150,11 +160,11 @@ func (c *crawler) collectLinksFromPage(ctx context.Context, target string) ([]st
 	}); err != nil {
 		observability.IncError(observability.ClassifyFetchError(err), "discovery")
 		slog.Debug("discovery page fetch failed", "url", target, "error", err)
-		return links, atsLinks
+		return links, atsLinks, isRateLimited(err)
 	}
 	observability.IncPagesCrawled("discovery")
 
-	return links, atsLinks
+	return links, atsLinks, false
 }
 
 func probePaths(base *url.URL) []string {
@@ -263,7 +273,6 @@ func acceptSitemapURL(u string) bool {
 		strings.Contains(l, "opening") ||
 		strings.Contains(l, "position") ||
 		strings.Contains(l, "opportun") ||
-		strings.Contains(l, "team") ||
 		strings.Contains(l, "join-us") ||
 		strings.Contains(l, "work-with-us") ||
 		strings.Contains(l, "early-careers")
@@ -301,4 +310,15 @@ func sameHost(base *url.URL, host string) bool {
 	baseHost := strings.ToLower(strings.TrimPrefix(base.Hostname(), "www."))
 	targetHost := strings.ToLower(strings.TrimPrefix(host, "www."))
 	return baseHost == targetHost
+}
+
+func isRateLimited(err error) bool {
+	if err == nil {
+		return false
+	}
+	var fetchErr *httpx.FetchError
+	if errors.As(err, &fetchErr) {
+		return fetchErr.Status == http.StatusTooManyRequests
+	}
+	return false
 }

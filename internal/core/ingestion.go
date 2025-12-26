@@ -261,6 +261,8 @@ func (s *IngestionService) pickScraper(rawURL, sourceType string) scraper.JobScr
 		return scraper.NewRemoteOKScraper("golang")
 	case strings.Contains(host, "weworkremotely.com"):
 		return scraper.NewWWRScraper()
+	case strings.Contains(host, "ashbyhq.com"):
+		return scraper.NewAshbyScraper(rawURL)
 	case strings.Contains(host, "lever.co"):
 		return scraper.NewLeverScraper(rawURL)
 	case strings.Contains(host, "greenhouse.io") || strings.Contains(host, "boards.greenhouse.io"):

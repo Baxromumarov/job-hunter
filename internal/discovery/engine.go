@@ -383,7 +383,8 @@ func (e *Engine) processCandidate(ctx context.Context, c candidateSource) {
 		return
 	}
 
-	decision := content.Classify(signals)
+	// Fix #4: Use ClassifyWithLogging for debug output on rejected pages
+	decision := content.ClassifyWithLogging(normalized, signals)
 	if decision.PageType == urlutil.PageTypeNonJob {
 		pageType := urlutil.PageTypeNonJobLowConfidence
 		reason := decision.Reason
@@ -503,7 +504,10 @@ func (e *Engine) discoverChildCandidates(ctx context.Context, parent candidateSo
 		return
 	}
 	c := newCrawler()
-	links, _ := c.collectLinksFromPage(ctx, parent.URL)
+	links, _, rateLimited := c.collectLinksFromPage(ctx, parent.URL)
+	if rateLimited {
+		return
+	}
 	for _, link := range links {
 		if link == "" || link == parent.URL {
 			continue
